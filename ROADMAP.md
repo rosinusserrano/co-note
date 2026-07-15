@@ -1,5 +1,40 @@
 # Roadmap
 
+## Status: the P2P broadcast path is built (v1)
+
+Broadcast/join over a WebRTC **star** is implemented and verified end-to-end:
+`server/signal-server.js` (matchmaking only), `src/lib/notes/webrtcStar.ts`
+(transport + enforcement), `src/lib/notes/broadcast.ts` (ids/tokens).
+
+The open questions below are answered as follows; the reasoning is worth keeping:
+
+- **Permission enforcement → solved by topology, not crypto.** `y-webrtc` was
+  rejected: it is a full mesh with no permission model (its `password` only
+  encrypts *signaling*), so an observer running a patched client could write
+  straight to other peers. In a star, every joiner's only link is to the
+  broadcaster, so the broadcaster always knows who sent an update and drops
+  writes from read-only peers. Verified with a hostile raw client: the identical
+  Yjs update lands with a valid token and is refused without one.
+- **Broadcast ID scheme → split into two secrets.** 8-char id (~39 bits) is the
+  room address and grants read-only; a separate 16-char token (~78 bits) grants
+  edit. The token travels over the P2P data channel, never through signaling, so
+  the central server cannot mint editors.
+- **NAT traversal → STUN only, deliberately.** TURN would relay the stroke data,
+  which is the thing this design exists to avoid. Hard-NAT pairs should fall back
+  to the central Yjs relay instead.
+
+### Still open
+
+- **Broadcaster is a single point.** If it drops off, joiners stop syncing. The
+  star is what makes permissions enforceable, so this is an accepted trade.
+- **Relay fallback is not automatic.** A broadcast that can't traverse NAT just
+  fails; nothing yet detects that and switches to `server/sync-server.js`.
+- **A joined note stays read-only after the broadcast ends**, even though it's
+  then just a local copy. Arguably it should become editable — undecided.
+- **Signaling server is unauthenticated and in-memory**, like the relay. Fine for
+  personal/LAN use; internet use needs hosting + abuse limits (nothing rate-limits
+  broadcast-id guessing today).
+
 ## North star: decentralized, local-first notes with P2P broadcast
 
 Notes belong to the user and live **locally** (already true today via y-indexeddb).

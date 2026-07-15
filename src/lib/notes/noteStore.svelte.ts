@@ -21,8 +21,18 @@ import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import type { Stroke } from './model';
+import { newBroadcastId, newEditToken, noteIdForBroadcast, type Role } from './broadcast';
+import { StarHost, StarGuest, type GuestStatus } from './webrtcStar';
 
 export type SyncStatus = 'offline' | 'connecting' | 'connected' | 'disconnected';
+
+function defaultSignalUrl(): string {
+	if (typeof window === 'undefined') return 'ws://localhost:5183';
+	const override = new URLSearchParams(location.search).get('signal');
+	if (override) return override;
+	const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+	return `${proto}://${location.hostname}:5183`;
+}
 
 /** The sync room / IndexedDB database name for a note id. The note index keys
  *  notes by the same id, so this is the only place the mapping is defined. */
@@ -62,11 +72,28 @@ class NoteStore {
 	status = $state<SyncStatus>('offline');
 	peers = $state(1); // this device + connected others
 
+	// --- Broadcast (P2P star) -------------------------------------------------
+	/** Non-empty while hosting or joined. Doubles as the signaling room address. */
+	broadcastId = $state('');
+	/** Only ever set on the host — this is the write credential we hand out. */
+	editToken = $state('');
+	/** Our part in the broadcast: 'host' | 'edit' | 'view', or null if not in one. */
+	role = $state<Role | null>(null);
+	broadcastPeers = $state(0);
+	broadcastEditors = $state(0);
+	/** Writes the host refused from read-only peers. Surfaced so enforcement is
+	 *  observable rather than a claim. */
+	rejectedWrites = $state(0);
+	guestStatus = $state<GuestStatus | null>(null);
+	guestError = $state('');
+
 	#doc: Y.Doc | null = null;
 	#arr: Y.Array<Stroke> | null = null;
 	#undo: Y.UndoManager | null = null;
 	#ws: WebsocketProvider | null = null;
 	#idb: IndexeddbPersistence | null = null;
+	#host: StarHost | null = null;
+	#guest: StarGuest | null = null;
 	#cache: Stroke[] = [];
 
 	/** Plain, non-reactive snapshot of strokes for imperative rendering. Pair
@@ -77,8 +104,12 @@ class NoteStore {
 
 	/** Open a note, tearing down any note already open. Switching notes swaps the
 	 *  whole Yjs layer (doc, local persistence, relay, undo history) — nothing
-	 *  carries across, since each note is an independent document and room. */
-	connect(id = 'default', wsUrl = defaultWsUrl()) {
+	 *  carries across, since each note is an independent document and room.
+	 *
+	 *  `relay: false` opens the note with local persistence only, no central
+	 *  relay — used when joining a broadcast, where the whole point is that
+	 *  stroke data travels P2P and never through a server. */
+	connect(id = 'default', opts: { wsUrl?: string; relay?: boolean } = {}) {
 		if (this.#doc && this.id === id) return; // already on this note
 		this.disconnect();
 		this.id = id;
@@ -114,8 +145,13 @@ class NoteStore {
 			if (current()) this.#refresh();
 		});
 
+		if (opts.relay === false) {
+			this.#refresh();
+			return;
+		}
+
 		this.status = 'connecting';
-		this.#ws = new WebsocketProvider(wsUrl, room, doc);
+		this.#ws = new WebsocketProvider(opts.wsUrl ?? defaultWsUrl(), room, doc);
 
 		// Give this session an awareness field before the socket opens.
 		//
@@ -127,7 +163,6 @@ class NoteStore {
 		// it clock 1, so the first broadcast lands and the peer count is right
 		// immediately. (Presence payloads will go here too — see ROADMAP.)
 		this.#ws.awareness.setLocalStateField('session', { joinedAt: Date.now() });
-
 		this.#ws.on('status', (e: { status: string }) => {
 			if (!current()) return;
 			this.status = e.status === 'connected' ? 'connected' : 'connecting';
@@ -143,10 +178,76 @@ class NoteStore {
 		this.#refresh();
 	}
 
+	/**
+	 * Broadcast the open note: mint an id + edit token and host a P2P star.
+	 * Returns the credentials — the id alone is a read-only invite, id + token
+	 * is an edit invite.
+	 */
+	startBroadcast(signalUrl = defaultSignalUrl()): { id: string; token: string } | null {
+		if (!this.#doc || this.#host) return null;
+		const id = newBroadcastId();
+		const token = newEditToken();
+		this.#host = new StarHost(this.#doc, signalUrl, id, token, () => {
+			if (!this.#host) return;
+			const s = this.#host.stats;
+			this.broadcastPeers = s.peers;
+			this.broadcastEditors = s.editors;
+			this.rejectedWrites = s.rejected;
+		});
+		this.broadcastId = id;
+		this.editToken = token;
+		this.role = 'host';
+		return { id, token };
+	}
+
+	stopBroadcast() {
+		this.#host?.destroy();
+		this.#host = null;
+		this.#resetBroadcast();
+	}
+
+	/**
+	 * Join someone else's broadcast. The note is filed locally (so it persists
+	 * and appears in the note list like any other), but opened with no relay —
+	 * strokes arrive only over the P2P channel.
+	 *
+	 * Passing a token *asks* for edit; the host decides. `role` reflects the
+	 * host's verdict, and is advisory for UI only — the host enforces.
+	 */
+	joinBroadcast(broadcastId: string, editToken = '', signalUrl = defaultSignalUrl()) {
+		const noteId = noteIdForBroadcast(broadcastId);
+		this.connect(noteId, { relay: false });
+		if (!this.#doc) return;
+		this.#guest = new StarGuest(this.#doc, signalUrl, broadcastId, editToken, () => {
+			if (!this.#guest) return;
+			this.role = this.#guest.role;
+			this.guestStatus = this.#guest.status;
+			this.guestError = this.#guest.error;
+		});
+		this.broadcastId = broadcastId;
+		this.guestStatus = 'connecting';
+	}
+
+	#resetBroadcast() {
+		this.broadcastId = '';
+		this.editToken = '';
+		this.role = null;
+		this.broadcastPeers = 0;
+		this.broadcastEditors = 0;
+		this.rejectedWrites = 0;
+		this.guestStatus = null;
+		this.guestError = '';
+	}
+
 	/** Close the open note and reset to the pre-connect state. Idempotent. */
 	disconnect() {
 		if (!this.#doc) return;
 		// Providers first, then the doc they observe.
+		this.#host?.destroy();
+		this.#guest?.destroy();
+		this.#host = null;
+		this.#guest = null;
+		this.#resetBroadcast();
 		this.#ws?.destroy();
 		this.#idb?.destroy();
 		this.#undo?.destroy();

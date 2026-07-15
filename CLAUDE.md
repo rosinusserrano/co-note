@@ -12,13 +12,17 @@ drawing live on a tablet (zoomed-in) with a stylus — see `README.md`.
 ## Current state
 
 Working app: pressure pen drawing, eraser, undo/redo, per-session pan/zoom, PWA
-install, local persistence, **multiple notes**, and **live cross-device sync**
-through a Yjs relay. Type-check and build are clean.
+install, local persistence, **multiple notes**, **live cross-device sync** through
+a Yjs relay, and **P2P broadcast/join** (WebRTC star, enforced read-only).
+Type-check and build are clean.
 
-- **Verified:** `npm run check`, `npm run build`, and a headless-Chrome pass over
-  the built app driving create/switch/rename/delete, per-note persistence across
-  reload, `?note=` join from an isolated browser profile, live stroke sync + peer
-  count through the relay, and independent zoom between two sessions.
+- **Verified:** `npm run check`, `npm run build`, and two headless-Chrome passes
+  over the built app: (a) create/switch/rename/delete, per-note persistence across
+  reload, `?note=` join from an isolated profile, live stroke sync + peer count
+  through the relay, independent zoom between sessions; (b) broadcast/join over
+  WebRTC — edit vs read-only roles, P2P stroke delivery, and **read-only
+  enforcement against a hostile raw client** (same Yjs update lands with a valid
+  token, refused without one).
 - **Not yet verified on real hardware:** on-device stylus feel and the Android
   install/load path. Local network reach was flaky over an iPhone hotspot (likely
   client isolation); a firewall rule for TCP 5173–5183 was added and is the fix on
@@ -48,6 +52,8 @@ Node ≥20.19).
 - `npm run dev` — dev server (`host: true`, so a tablet on the same LAN can reach it).
 - `npm run sync` — Yjs relay server on port **5182** (`SYNC_PORT` to override).
   Run this alongside the app for cross-device sync; both devices connect to it.
+- `npm run signal` — WebRTC matchmaking server on port **5183** (`SIGNAL_PORT`).
+  Needed for broadcast/join. It never sees stroke data or the edit token.
 - `npm run build` — production build to `build/`.
 - `npm run preview` — serve the built SPA locally.
 - `npm run check` — `svelte-kit sync` + `svelte-check` (type check). Run this
@@ -112,6 +118,27 @@ must be preserved:
 - `'default'` is the pre-notes-list note, seeded into the index on first run so
   existing drawings survive the upgrade. It isn't special otherwise.
 
+### Broadcast / P2P (`webrtcStar.ts` + `broadcast.ts` + `server/signal-server.js`)
+
+- **The star topology IS the permission model.** Joiners connect only to the
+  broadcaster, so it always knows which peer sent an update and drops writes from
+  read-only peers (`StarHost.#onData`, the `role !== 'edit'` check). Do not
+  "upgrade" this to a mesh (e.g. `y-webrtc`) — a mesh lets peers talk directly,
+  which makes read-only unenforceable without signing every update. This was the
+  reason y-webrtc was rejected; see ROADMAP.
+- **Two secrets, not one.** 8-char broadcast id = room address = read-only invite.
+  16-char edit token = write access. The token is presented over the **WebRTC data
+  channel**, never through signaling, so the signaling server stays matchmaking-only
+  and cannot mint editors. Don't move it into the signaling messages.
+- The client's `role` is **advisory, for UI only** — the host is what enforces.
+  Never rely on a joiner reporting its own role.
+- Joined broadcasts open with `connect(id, { relay: false })`: local persistence
+  only, no central relay, so stroke data really does travel P2P.
+- Sync over the data channel is hand-rolled on plain `yjs` (tags HELLO/ROLE/SV/
+  UPDATE) rather than y-protocols + simple-peer — `simple-peer` needs Node globals
+  (`Buffer`/`process`) that Vite won't supply without polyfill config.
+- STUN only, no TURN, on purpose: TURN would relay the stroke data. See ROADMAP.
+
 ### Sync (`noteStore.svelte.ts` + `server/sync-server.js`)
 
 - Strokes live in a `Y.Array<Stroke>` (room = `pennable-<noteId>`). `y-indexeddb`
@@ -159,13 +186,13 @@ must be preserved:
 
 ## Not built yet
 
-See `ROADMAP.md` for the full plan. Highlights:
+See `ROADMAP.md` for the full plan and the still-open questions. Highlights:
 
-- **North star: decentralized P2P broadcast.** Notes stay local; a central server
-  does *matchmaking only* while stroke data flows peer-to-peer (WebRTC). Broadcast
-  a note → get a broadcast ID → others join read-only or editable. Today's
-  `server/sync-server.js` (central Yjs relay) becomes the fallback for large
-  audiences / NAT-traversal failures.
-- **Deploying sync beyond the LAN** — the relay is in-memory and unauthenticated,
-  fine for personal same-network use. Internet use needs hosting + access control.
+- **Automatic relay fallback** — a broadcast that can't traverse NAT just fails;
+  nothing detects this and falls back to `server/sync-server.js` yet.
+- **Deploying beyond the LAN** — relay and signaling server are both in-memory and
+  unauthenticated, fine for personal same-network use. Internet use needs hosting,
+  access control, and something to stop broadcast-id guessing.
 - **Awareness UI** — peer *count* is shown, but live cursors/presence aren't.
+  `connect()` already puts a `session` field in awareness for this to build on.
+- **Real PWA icons** — `static/icons/*` are generated placeholders.

@@ -4,6 +4,7 @@
 	import DrawingCanvas from '$lib/components/DrawingCanvas.svelte';
 	import { noteStore, destroyNoteData } from '$lib/notes/noteStore.svelte';
 	import { noteIndex } from '$lib/notes/noteIndex.svelte';
+	import { broadcastLinks, noteIdForBroadcast } from '$lib/notes/broadcast';
 	import { Viewport } from '$lib/notes/viewport.svelte';
 
 	// One viewport per session. This is what stays independent across devices —
@@ -24,9 +25,20 @@
 
 	onMount(() => {
 		noteIndex.load();
+		const params = new URLSearchParams(location.search);
+
+		// ?b=<id> joins a broadcast read-only; &t=<token> asks the host for edit.
+		const bid = params.get('b');
+		if (bid) {
+			noteIndex.ensure(noteIdForBroadcast(bid)).id;
+			noteIndex.rename(noteIdForBroadcast(bid), `Broadcast ${bid}`);
+			noteStore.joinBroadcast(bid, params.get('t') ?? '');
+			return () => noteStore.disconnect();
+		}
+
 		// ?note=<id> opens a specific note — this is how a second device reaches
 		// the same drawing, since the note list itself is local to each device.
-		const requested = new URLSearchParams(location.search).get('note');
+		const requested = params.get('note');
 		const id = requested ? noteIndex.ensure(requested).id : noteIndex.notes[0].id;
 		// No URL write on mount: replaceState before the router has initialised
 		// throws, and there is nothing to correct — either ?note= already names
@@ -34,6 +46,31 @@
 		openNote(id, { updateUrl: false });
 		return () => noteStore.disconnect();
 	});
+
+	let links = $state<{ view: string; edit: string } | null>(null);
+
+	function toggleBroadcast() {
+		if (noteStore.role === 'host') {
+			noteStore.stopBroadcast();
+			links = null;
+			return;
+		}
+		const started = noteStore.startBroadcast();
+		if (started) links = broadcastLinks(started.id, started.token);
+	}
+
+	async function copy(text: string) {
+		try {
+			await navigator.clipboard.writeText(text);
+		} catch {
+			/* clipboard blocked (insecure origin / no permission) — the input is
+			   still there to select by hand */
+		}
+	}
+
+	// A viewer cannot ink. This mirrors the host's decision in the UI; it is NOT
+	// what enforces read-only (the host drops their writes — see webrtcStar.ts).
+	const effectiveMode = $derived(noteStore.role === 'view' ? 'observe' : mode);
 
 	function openNote(id: string, opts: { updateUrl?: boolean } = {}) {
 		if (noteStore.id !== id) viewport.reset();
@@ -65,6 +102,25 @@
 	}
 
 	const zoomPct = $derived(Math.round(viewport.scale * 100));
+
+	// Status is checked BEFORE role: a joiner keeps its role for the whole
+	// session, so testing role first would mean 'Joined · read-only' could never
+	// give way to 'Broadcast ended' once the host went away.
+	const broadcastLabel = $derived(
+		noteStore.role === 'host'
+			? `Broadcasting · ${noteStore.broadcastPeers} joined${
+					noteStore.broadcastEditors ? ` · ${noteStore.broadcastEditors} editing` : ''
+				}`
+			: noteStore.guestStatus === 'ended'
+				? 'Broadcast ended'
+				: noteStore.guestStatus === 'error'
+					? `Can't join: ${noteStore.guestError}`
+					: noteStore.role === 'edit'
+						? 'Joined · can edit'
+						: noteStore.role === 'view'
+							? 'Joined · read-only'
+							: 'Connecting to broadcast…'
+	);
 
 	const syncLabel = $derived(
 		noteStore.status === 'connected'
@@ -142,22 +198,63 @@
 
 		<div class="group">
 			<button
-				class:active={mode === 'observe'}
+				class:active={effectiveMode === 'observe'}
+				disabled={noteStore.role === 'view'}
 				onclick={() => (mode = mode === 'draw' ? 'observe' : 'draw')}
-				title="Observer sessions view only — no inking"
+				title={noteStore.role === 'view'
+					? 'You joined this broadcast read-only'
+					: 'Observer sessions view only — no inking'}
 			>
-				{mode === 'draw' ? 'Drawing' : 'Observing'}
+				{effectiveMode === 'draw' ? 'Drawing' : 'Observing'}
+			</button>
+			<button
+				class:active={noteStore.role === 'host'}
+				disabled={noteStore.role === 'view' || noteStore.role === 'edit'}
+				onclick={toggleBroadcast}
+				title="Share this note peer-to-peer"
+			>
+				{noteStore.role === 'host' ? 'Stop broadcast' : 'Broadcast'}
 			</button>
 		</div>
 
-		<div class="group sync" title={`Sync relay: ${noteStore.status}`}>
-			<span class="dot" data-status={noteStore.status}></span>
-			<span class="sync-label">{syncLabel}</span>
-		</div>
+		{#if noteStore.role || noteStore.guestStatus}
+			<div class="group sync" title={`Broadcast ${noteStore.broadcastId}`}>
+				<span
+					class="dot"
+					data-status={noteStore.role === 'host' ? 'connected' : (noteStore.guestStatus ?? '')}
+				></span>
+				<span class="p2p-label">{broadcastLabel}</span>
+				{#if noteStore.rejectedWrites > 0}
+					<span class="rejected" title="Writes refused from read-only peers">
+						{noteStore.rejectedWrites} blocked
+					</span>
+				{/if}
+			</div>
+		{:else}
+			<div class="group sync" title={`Sync relay: ${noteStore.status}`}>
+				<span class="dot" data-status={noteStore.status}></span>
+				<span class="sync-label">{syncLabel}</span>
+			</div>
+		{/if}
 	</header>
 
+	{#if links}
+		<div class="share">
+			<label>
+				<span>View link (read-only)</span>
+				<input readonly value={links.view} onfocus={(e) => e.currentTarget.select()} />
+				<button onclick={() => copy(links!.view)}>Copy</button>
+			</label>
+			<label>
+				<span class="warn">Edit link — grants drawing</span>
+				<input readonly value={links.edit} onfocus={(e) => e.currentTarget.select()} />
+				<button onclick={() => copy(links!.edit)}>Copy</button>
+			</label>
+		</div>
+	{/if}
+
 	<main class="stage">
-		<DrawingCanvas {viewport} {mode} {tool} {color} {strokeWidth} />
+		<DrawingCanvas {viewport} mode={effectiveMode} {tool} {color} {strokeWidth} />
 	</main>
 </div>
 
@@ -259,6 +356,45 @@
 	}
 	.dot[data-status='disconnected'] {
 		background: #ef4444;
+	}
+	.dot[data-status='ended'],
+	.dot[data-status='error'] {
+		background: #ef4444;
+	}
+	.rejected {
+		margin-left: 0.4rem;
+		padding: 0.05rem 0.35rem;
+		border-radius: 0.3rem;
+		background: #7f1d1d;
+		color: #fecaca;
+		font-size: 0.72rem;
+	}
+	.share {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 1rem;
+		padding: 0.5rem 0.75rem;
+		background: var(--panel-2);
+		border-bottom: 1px solid #000;
+		z-index: 2;
+	}
+	.share label {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: 0.78rem;
+	}
+	.share input {
+		width: min(22rem, 42vw);
+		background: var(--panel);
+		color: var(--text);
+		border: 1px solid #000;
+		border-radius: 0.3rem;
+		padding: 0.25rem 0.4rem;
+		font-size: 0.75rem;
+	}
+	.share .warn {
+		color: #fca5a5;
 	}
 	.stage {
 		position: relative;
