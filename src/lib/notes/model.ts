@@ -22,18 +22,11 @@ export interface Stroke {
 	points: StrokePoint[];
 }
 
-export interface Note {
-	id: string;
-	title: string;
-	strokes: Stroke[];
-	updatedAt: number;
-}
+// A note itself has no type here: its strokes are the Yjs Y.Array in
+// noteStore.svelte.ts, and its title/id are NoteMeta in noteIndex.svelte.ts.
+// The two are joined by note id.
 
-export function createEmptyNote(id = 'default'): Note {
-	return { id, title: 'Untitled note', strokes: [], updatedAt: Date.now() };
-}
-
-/** Cheap unique-enough id for strokes/sessions (no external dependency). */
+/** Cheap unique-enough id for strokes/notes (no external dependency). */
 export function uid(): string {
 	return (
 		Date.now().toString(36) + Math.random().toString(36).slice(2, 8)

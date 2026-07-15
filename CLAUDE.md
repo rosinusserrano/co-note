@@ -11,18 +11,20 @@ drawing live on a tablet (zoomed-in) with a stylus — see `README.md`.
 
 ## Current state
 
-Working single-note app: pressure pen drawing, eraser, undo/redo, per-session
-pan/zoom, PWA install, local persistence, and **live cross-device sync** through a
-Yjs relay (verified between clients). Type-check and build are clean.
+Working app: pressure pen drawing, eraser, undo/redo, per-session pan/zoom, PWA
+install, local persistence, **multiple notes**, and **live cross-device sync**
+through a Yjs relay. Type-check and build are clean.
 
-- **Verified:** `npm run check`, `npm run build`, and stroke sync between two
-  clients through the relay.
+- **Verified:** `npm run check`, `npm run build`, and a headless-Chrome pass over
+  the built app driving create/switch/rename/delete, per-note persistence across
+  reload, `?note=` join from an isolated browser profile, live stroke sync + peer
+  count through the relay, and independent zoom between two sessions.
 - **Not yet verified on real hardware:** on-device stylus feel and the Android
   install/load path. Local network reach was flaky over an iPhone hotspot (likely
   client isolation); a firewall rule for TCP 5173–5183 was added and is the fix on
   a normal router.
 - **Next:** see `ROADMAP.md`. North star is decentralized P2P broadcast (central =
-  matchmaking only). Most self-contained next task: multiple notes/pages.
+  matchmaking only).
 
 ## Stack
 
@@ -77,18 +79,38 @@ must be preserved:
 
 ### Key files
 
-- `src/lib/notes/model.ts` — `Stroke`/`StrokePoint`/`Note` types; all geometry in
-  world coords, `pressure` in [0,1].
+- `src/lib/notes/model.ts` — `Stroke`/`StrokePoint` types; all geometry in
+  world coords, `pressure` in [0,1]. There is no `Note` type: a note's strokes are
+  the Yjs array in `noteStore`, its title/id are `NoteMeta` in `noteIndex`.
+- `src/lib/notes/noteIndex.svelte.ts` — the list of notes **on this device**
+  (localStorage, *not* a Yjs doc, deliberately not synced — see below).
 - `src/lib/notes/viewport.svelte.ts` — the per-session transform (`toWorld`,
   `toScreen`, `panBy`, `zoomAt`, `reset`). Runes class.
 - `src/lib/notes/noteStore.svelte.ts` — the Yjs-backed shared note (see "Sync"
-  below). Public API the UI depends on: `connect(id, wsUrl?)`, `strokes` (plain
-  cached array — read together with the reactive `revision` counter), `strokeCount`,
-  `addStroke`, `removeStrokes(ids)`, `beginChange`, `clear`, `undo`/`redo`,
-  `canUndo`/`canRedo`, and `status`/`peers` for the sync indicator.
+  below). Public API the UI depends on: `connect(id, wsUrl?)`/`disconnect()`,
+  `strokes` (plain cached array — read together with the reactive `revision`
+  counter), `strokeCount`, `addStroke`, `removeStrokes(ids)`, `beginChange`,
+  `clear`, `undo`/`redo`, `canUndo`/`canRedo`, and `status`/`peers` for the sync
+  indicator. Module-level: `roomFor(id)`, `destroyNoteData(id)`.
 - `src/lib/components/DrawingCanvas.svelte` — the canvas + all input. See below.
 - `src/routes/+page.svelte` — toolbar + owns the session `Viewport` and draw/observe mode.
 - `server/sync-server.js` — the standalone Yjs relay (Node + `ws`).
+
+### Notes (`noteIndex.svelte.ts`)
+
+- **The note index is local-only and is not a Yjs doc.** Per `ROADMAP.md` notes
+  belong to the user and live locally; only a note you explicitly hand to someone
+  is shared. So each device has its own list, and a peer reaches a specific note
+  by id: **`?note=<id>`**. Don't "fix" this by syncing the index — that seam is
+  where the broadcast/join flow (broadcast ID + permission handshake) plugs in.
+- One note = one Yjs doc = one room = one IndexedDB database (`roomFor(id)`).
+  Switching notes swaps the whole Yjs layer; nothing carries across.
+- `connect()` is the only entry point and tears down the previous note first.
+  Its async callbacks (idb `synced`, ws `status`, awareness) all guard on the doc
+  still being the open one, so a fast switch can't have a stale note write state
+  belonging to the new one.
+- `'default'` is the pre-notes-list note, seeded into the index on first run so
+  existing drawings survive the upgrade. It isn't special otherwise.
 
 ### Sync (`noteStore.svelte.ts` + `server/sync-server.js`)
 
@@ -144,8 +166,6 @@ See `ROADMAP.md` for the full plan. Highlights:
   a note → get a broadcast ID → others join read-only or editable. Today's
   `server/sync-server.js` (central Yjs relay) becomes the fallback for large
   audiences / NAT-traversal failures.
-- **Multiple notes/pages** — everything is one note (`'default'`); the room/id
-  plumbing exists but there's no UI to create/switch notes.
 - **Deploying sync beyond the LAN** — the relay is in-memory and unauthenticated,
   fine for personal same-network use. Internet use needs hosting + access control.
 - **Awareness UI** — peer *count* is shown, but live cursors/presence aren't.

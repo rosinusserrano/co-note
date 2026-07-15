@@ -60,8 +60,10 @@ to find each other. Once they've found each other, the actual drawing data flows
 
 ## Nearer-term candidates (smaller, independent of the above)
 
-- **Multiple notes / pages** — a real list to create/switch notes (the room/id
-  plumbing already exists; only one `'default'` note today).
+- ~~**Multiple notes / pages**~~ — done. Local note index (`noteIndex.svelte.ts`)
+  + `?note=<id>` to open a specific note. The index is deliberately local-only,
+  so `?note=<id>` is the embryonic form of the join flow above: replace it with a
+  real broadcast ID + permission handshake and the UX lands.
 - **Live presence** — show peers' cursors/viewports, not just a peer count.
 - **Stroke polish** — curve smoothing; "fit to content" so the laptop view can
   auto-frame the whole drawing.

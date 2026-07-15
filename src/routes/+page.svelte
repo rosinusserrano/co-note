@@ -1,9 +1,14 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { replaceState } from '$app/navigation';
 	import DrawingCanvas from '$lib/components/DrawingCanvas.svelte';
-	import { noteStore } from '$lib/notes/noteStore.svelte';
+	import { noteStore, destroyNoteData } from '$lib/notes/noteStore.svelte';
+	import { noteIndex } from '$lib/notes/noteIndex.svelte';
 	import { Viewport } from '$lib/notes/viewport.svelte';
 
-	// One viewport per session. This is what stays independent across devices.
+	// One viewport per session. This is what stays independent across devices —
+	// including across note switches, where we reset it rather than carry a
+	// previous note's zoom into an unrelated drawing.
 	const viewport = new Viewport();
 
 	const palette = ['#f9fafb', '#111827', '#ef4444', '#3b82f6', '#22c55e', '#eab308'];
@@ -15,9 +20,49 @@
 	let innerWidth = $state(0);
 	let innerHeight = $state(0);
 
-	$effect(() => {
-		noteStore.connect('default');
+	const title = $derived(noteIndex.get(noteStore.id)?.title ?? 'Untitled note');
+
+	onMount(() => {
+		noteIndex.load();
+		// ?note=<id> opens a specific note — this is how a second device reaches
+		// the same drawing, since the note list itself is local to each device.
+		const requested = new URLSearchParams(location.search).get('note');
+		const id = requested ? noteIndex.ensure(requested).id : noteIndex.notes[0].id;
+		// No URL write on mount: replaceState before the router has initialised
+		// throws, and there is nothing to correct — either ?note= already names
+		// this note, or its absence just means "the first one".
+		openNote(id, { updateUrl: false });
+		return () => noteStore.disconnect();
 	});
+
+	function openNote(id: string, opts: { updateUrl?: boolean } = {}) {
+		if (noteStore.id !== id) viewport.reset();
+		noteStore.connect(id); // no-op if this note is already open
+		if (opts.updateUrl !== false) {
+			const url = new URL(location.href); // keep ?sync= and friends
+			url.searchParams.set('note', id);
+			replaceState(url, {});
+		}
+	}
+
+	function newNote() {
+		openNote(noteIndex.create().id);
+	}
+
+	function renameNote() {
+		const next = prompt('Note name', title);
+		if (next !== null) noteIndex.rename(noteStore.id, next);
+	}
+
+	async function deleteNote() {
+		const id = noteStore.id;
+		if (noteIndex.notes.length <= 1) return;
+		if (!confirm(`Delete "${title}"? This erases its drawing on this device.`)) return;
+		const next = noteIndex.notes.find((n) => n.id !== id);
+		if (!next || !noteIndex.remove(id)) return;
+		openNote(next.id); // disconnects the doomed doc before we delete its data
+		await destroyNoteData(id);
+	}
 
 	const zoomPct = $derived(Math.round(viewport.scale * 100));
 
@@ -34,6 +79,28 @@
 
 <div class="app">
 	<header class="toolbar">
+		<div class="group">
+			<select
+				class="notes"
+				aria-label="Current note"
+				value={noteStore.id}
+				onchange={(e) => openNote(e.currentTarget.value)}
+			>
+				{#each noteIndex.notes as n (n.id)}
+					<option value={n.id}>{n.title}</option>
+				{/each}
+			</select>
+			<button onclick={newNote} title="New note">New</button>
+			<button onclick={renameNote} title="Rename this note">Rename</button>
+			<button
+				onclick={deleteNote}
+				disabled={noteIndex.notes.length <= 1}
+				title="Delete this note on this device"
+			>
+				Delete
+			</button>
+		</div>
+
 		<div class="group">
 			{#each palette as c (c)}
 				<button
@@ -63,9 +130,13 @@
 		</div>
 
 		<div class="group">
-			<button onclick={() => viewport.zoomAt(innerWidth / 2, innerHeight / 2, 1.25)}>+</button>
+			<button aria-label="Zoom in" onclick={() => viewport.zoomAt(innerWidth / 2, innerHeight / 2, 1.25)}>
+				+
+			</button>
 			<span class="zoom">{zoomPct}%</span>
-			<button onclick={() => viewport.zoomAt(innerWidth / 2, innerHeight / 2, 0.8)}>−</button>
+			<button aria-label="Zoom out" onclick={() => viewport.zoomAt(innerWidth / 2, innerHeight / 2, 0.8)}>
+				−
+			</button>
 			<button onclick={() => viewport.reset()}>Reset</button>
 		</div>
 
@@ -134,6 +205,16 @@
 	button.active {
 		border-color: var(--accent);
 		background: var(--accent);
+	}
+	.notes {
+		background: var(--panel-2);
+		color: var(--text);
+		border: 1px solid transparent;
+		border-radius: 0.4rem;
+		padding: 0.35rem 0.6rem;
+		font-size: 0.85rem;
+		max-width: 10rem;
+		cursor: pointer;
 	}
 	.swatch {
 		width: 1.5rem;

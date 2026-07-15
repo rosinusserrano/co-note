@@ -24,6 +24,25 @@ import type { Stroke } from './model';
 
 export type SyncStatus = 'offline' | 'connecting' | 'connected' | 'disconnected';
 
+/** The sync room / IndexedDB database name for a note id. The note index keys
+ *  notes by the same id, so this is the only place the mapping is defined. */
+export function roomFor(id: string): string {
+	return `pennable-${id}`;
+}
+
+/** Delete a note's local stroke data. Only valid for a note that is not
+ *  currently connected — disconnect() or switch away first, or the live doc
+ *  will just re-persist itself. */
+export function destroyNoteData(id: string): Promise<void> {
+	if (typeof indexedDB === 'undefined') return Promise.resolve();
+	return new Promise((resolve) => {
+		const req = indexedDB.deleteDatabase(roomFor(id));
+		// Resolve on any terminal outcome: losing the data delete is not worth
+		// blocking the UI over, and a blocked delete still lands once tabs close.
+		req.onsuccess = req.onerror = req.onblocked = () => resolve();
+	});
+}
+
 function defaultWsUrl(): string {
 	if (typeof window === 'undefined') return 'ws://localhost:5182';
 	// Allow ?sync=ws://host:port override for testing against a remote relay.
@@ -56,18 +75,28 @@ class NoteStore {
 		return this.#cache;
 	}
 
+	/** Open a note, tearing down any note already open. Switching notes swaps the
+	 *  whole Yjs layer (doc, local persistence, relay, undo history) — nothing
+	 *  carries across, since each note is an independent document and room. */
 	connect(id = 'default', wsUrl = defaultWsUrl()) {
-		if (this.#doc) return; // single note for now; already connected
+		if (this.#doc && this.id === id) return; // already on this note
+		this.disconnect();
 		this.id = id;
-		const room = `pennable-${id}`;
+		const room = roomFor(id);
 
 		const doc = new Y.Doc();
 		const arr = doc.getArray<Stroke>('strokes');
 		this.#doc = doc;
 		this.#arr = arr;
 
+		// Async callbacks below can outlive a fast note switch, so every one of
+		// them checks that `doc` is still the open document before touching state
+		// — otherwise a stale note's late 'synced' would report as the new one's.
+		const current = () => this.#doc === doc;
+
 		this.#idb = new IndexeddbPersistence(room, doc);
 		this.#idb.on('synced', () => {
+			if (!current()) return;
 			this.loaded = true;
 			this.#refresh();
 		});
@@ -81,7 +110,9 @@ class NoteStore {
 		this.#undo.on('stack-item-popped', flags);
 		this.#undo.on('stack-cleared', flags);
 
-		arr.observe(() => this.#refresh());
+		arr.observe(() => {
+			if (current()) this.#refresh();
+		});
 
 		this.status = 'connecting';
 		this.#ws = new WebsocketProvider(wsUrl, room, doc);
@@ -98,14 +129,42 @@ class NoteStore {
 		this.#ws.awareness.setLocalStateField('session', { joinedAt: Date.now() });
 
 		this.#ws.on('status', (e: { status: string }) => {
+			if (!current()) return;
 			this.status = e.status === 'connected' ? 'connected' : 'connecting';
 		});
-		this.#ws.on('connection-close', () => (this.status = 'disconnected'));
+		this.#ws.on('connection-close', () => {
+			if (current()) this.status = 'disconnected';
+		});
 		this.#ws.awareness.on('change', () => {
+			if (!current()) return;
 			this.peers = this.#ws ? this.#ws.awareness.getStates().size : 1;
 		});
 
 		this.#refresh();
+	}
+
+	/** Close the open note and reset to the pre-connect state. Idempotent. */
+	disconnect() {
+		if (!this.#doc) return;
+		// Providers first, then the doc they observe.
+		this.#ws?.destroy();
+		this.#idb?.destroy();
+		this.#undo?.destroy();
+		this.#doc.destroy();
+		this.#ws = null;
+		this.#idb = null;
+		this.#undo = null;
+		this.#doc = null;
+		this.#arr = null;
+
+		this.#cache = [];
+		this.loaded = false;
+		this.strokeCount = 0;
+		this.canUndo = false;
+		this.canRedo = false;
+		this.status = 'offline';
+		this.peers = 1;
+		this.revision++; // repaint the now-empty canvas
 	}
 
 	/** Snapshot boundary for undo: call once at the start of a gesture so it
