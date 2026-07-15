@@ -85,6 +85,18 @@ class NoteStore {
 
 		this.status = 'connecting';
 		this.#ws = new WebsocketProvider(wsUrl, room, doc);
+
+		// Give this session an awareness field before the socket opens.
+		//
+		// Awareness starts with local state `{}` at clock 0, and a peer that has
+		// never heard of us also assumes clock 0. The protocol only accepts an
+		// update when `currClock < clock` (y-protocols/awareness), so a clock-0
+		// state is dropped on arrival and we stay invisible until Awareness's
+		// internal timer renews the clock ~15s later. Writing a field here makes
+		// it clock 1, so the first broadcast lands and the peer count is right
+		// immediately. (Presence payloads will go here too — see ROADMAP.)
+		this.#ws.awareness.setLocalStateField('session', { joinedAt: Date.now() });
+
 		this.#ws.on('status', (e: { status: string }) => {
 			this.status = e.status === 'connected' ? 'connected' : 'connecting';
 		});

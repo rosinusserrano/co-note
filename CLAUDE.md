@@ -106,6 +106,13 @@ must be preserved:
 - Strokes are treated as **immutable once committed** (append + delete only) — do
   not mutate a stroke in place, or you'll desync peers and break undo snapshots.
 - WS URL: defaults to `ws(s)://<page-host>:5182`, overridable with `?sync=ws://…`.
+- **`connect()` must set an awareness field** (`setLocalStateField('session', …)`)
+  before the socket opens — don't remove it. Awareness starts at clock 0, and a
+  peer that has never seen us also assumes clock 0; `applyAwarenessUpdate` only
+  accepts an update when `currClock < clock`, so a clock-0 state is dropped and
+  the session stays invisible until Awareness's timer renews the clock ~15s later.
+  Without the field the peer count silently reads 1 for the first ~15s. Stroke
+  sync is unaffected (different message type), which is what makes it easy to miss.
 
 ### Canvas & input conventions (`DrawingCanvas.svelte`)
 
