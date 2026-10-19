@@ -197,6 +197,8 @@ secret and drawings live in `/var/lib/conote` (systemd `StateDirectory`);
 kept; restore steps in `deploy/backup.sh`). The old open matchmaking service
 `conote-signal` (:5183) is retired by `update-server.sh` if still installed.
 
+- `bash deploy/deploy.sh` — both of the below in one go, server first
+  (asks for sudo), then checks the live server answers as the new one.
 - `sudo bash deploy/setup-server.sh` — first install, and again whenever
   `deploy/Caddyfile` changes. Re-runnable: it replaces its own Caddy block
   (backup first, restored if Caddy rejects it), then runs the two below.
