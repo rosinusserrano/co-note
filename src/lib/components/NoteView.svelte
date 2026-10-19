@@ -137,6 +137,37 @@
 		}
 	}
 
+	// --- The pen's barrel button: a tool for as long as it's held ------------
+
+	const PEN_BUTTON_KEY = 'conote:penButton';
+	const PEN_BUTTON = [
+		{ id: 'eraser', icon: 'eraser', label: 'Eraser' },
+		{ id: 'marker', icon: 'marker', label: 'Marker' },
+		{ id: 'laser', icon: 'laser', label: 'Laser' },
+		{ id: 'hand', icon: 'hand', label: 'Hand (move)' },
+		{ id: 'off', icon: 'x', label: 'Nothing' }
+	] as const satisfies readonly { id: Tool | 'off'; icon: IconName; label: string }[];
+	type PenButton = (typeof PEN_BUTTON)[number]['id'];
+	/** Per device, remembered; erasing is what most pens' button means elsewhere. */
+	let penButton = $state<PenButton>(
+		(() => {
+			try {
+				const v = localStorage.getItem(PEN_BUTTON_KEY);
+				return PEN_BUTTON.some((b) => b.id === v) ? (v as PenButton) : 'eraser';
+			} catch {
+				return 'eraser';
+			}
+		})()
+	);
+	/** The marker keeps its own colour and size; the rest don't draw. */
+	const penButtonUse = $derived(
+		penButton === 'off' ? null : { tool: penButton, color: inks.marker.color, width: inks.marker.width }
+	);
+	function setPenButton(b: PenButton) {
+		penButton = b;
+		writeLocal(PEN_BUTTON_KEY, b);
+	}
+
 	function toggleFinger() {
 		fingerPref = fingerInks ? 'move' : 'draw';
 		writeLocal(FINGER_KEY, fingerPref);
@@ -497,6 +528,7 @@
 			{snap}
 			{fingerInks}
 			onpen={onPen}
+			penButton={penButtonUse}
 		/>
 	</main>
 
@@ -783,6 +815,23 @@
 							>{fingerInks ? 'draws' : 'moves'}</span
 						>
 					</button>
+					<div class="item static" title="What a pen does while its side button is held as it touches the screen (this device). The eraser end of a pen always erases.">
+						<Icon name="pen" size={18} /><span>Pen button</span>
+						<span class="choice" role="radiogroup" aria-label="Pen button">
+							{#each PEN_BUTTON as b (b.id)}
+								<button
+									role="radio"
+									aria-checked={penButton === b.id}
+									aria-label={b.label}
+									title={b.label}
+									class:on={penButton === b.id}
+									onclick={() => setPenButton(b.id)}
+								>
+									<Icon name={b.icon} size={15} />
+								</button>
+							{/each}
+						</span>
+					</div>
 					<button class="item" onclick={() => (mode = mode === 'draw' ? 'observe' : 'draw')} title="Look only: pen and mouse move the view instead of drawing">
 						<Icon name="eye" size={18} /><span>Look only</span><span class="kicker" class:lit={mode === 'observe'}
 							>{mode === 'observe' ? 'on' : 'off'}</span
@@ -1614,6 +1663,39 @@
 	.item .kicker {
 		color: var(--graphite);
 		font-size: 0.6rem;
+	}
+	.item.static {
+		cursor: default;
+	}
+	.item.static:hover {
+		background: transparent;
+	}
+	/* A row of small icon choices at the end of a menu item. */
+	.choice {
+		display: flex;
+		gap: 2px;
+		padding: 2px;
+		border-radius: 999px;
+		background: var(--paper-2);
+	}
+	.choice button {
+		display: grid;
+		place-items: center;
+		width: 28px;
+		height: 26px;
+		padding: 0;
+		border: none;
+		border-radius: 999px;
+		background: transparent;
+		color: var(--graphite);
+		cursor: pointer;
+	}
+	.choice button:hover {
+		color: var(--ink);
+	}
+	.choice button.on {
+		background: var(--lime);
+		color: var(--ink);
 	}
 	.item .kicker.lit {
 		color: var(--ink);

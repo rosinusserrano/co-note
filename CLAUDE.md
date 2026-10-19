@@ -80,6 +80,12 @@ chosen device.
   ignored, a finger pans again after the grace time; a palm that landed before
   the pen stops counting; the canvas context menu is blocked; following glides
   over several frames.
+  Pen-button round (11 checks, pen over CDP): the ⋯ menu offers Eraser
+  (default) / Marker / Laser / Hand / Nothing; a barrel-held stroke erases,
+  draws a marker stroke in the marker's colour, leaves only a fading laser,
+  pans, or does nothing, while the selected tool stays the pen and a plain
+  stroke draws again; the eraser end (button 5) erases; the choice survives a
+  reload.
   Names round (10 checks): both forms have an optional *Your name*; the
   owner's people list, canvas cursor tag (only with others shown) and the
   observer's focus chip and pulled notice use the names; remembered per
@@ -457,7 +463,14 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   until the first pen event (touch or hover, `onpen`), then `conote:pen` is
   remembered and fingers navigate; *One finger* in the ⋯ menu overrides it
   (`conote:finger` = `draw` | `move`). The hand tool, observe mode and focus
-  always make one finger pan. A **finger stroke that a second finger joins
+  always make one finger pan. **Pen buttons** (`useFor`, decided once at
+  pen-down): the eraser end (button 5 / buttons 32) always erases; a pen that
+  touches down with its barrel button held (button 2, buttons 2 — Windows Ink
+  and Android report it as the secondary button alone) uses the `penButton`
+  prop instead of the tool: eraser, marker (in the marker's own colour and
+  size), laser or hand, set in the ⋯ menu per device (localStorage
+  `conote:penButton`, default eraser); *Nothing* ignores such contacts. A
+  **finger stroke that a second finger joins
   within `FINGER_SETTLE_MS`** was the start of a pinch: it's aborted (never
   committed, no undo step) and both fingers zoom; its live preview is held
   back for that long, so the others never see it. Later second fingers are

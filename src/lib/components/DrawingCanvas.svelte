@@ -37,7 +37,14 @@
 		fingerInks?: boolean;
 		/** Called once, the first time a pen is seen (touching or hovering). */
 		onpen?: () => void;
+		/** What a pen does while its barrel button is held as it touches down
+		 *  (null: nothing special). A pen's eraser end always erases. */
+		penButton?: PenUse | null;
 	}
+
+	type Tool = NonNullable<Props['tool']>;
+	/** A tool with the ink it draws in. */
+	type PenUse = { tool: Tool; color: string; width: number };
 
 	let {
 		viewport,
@@ -54,7 +61,8 @@
 		snap = false,
 		onactive,
 		fingerInks = false,
-		onpen
+		onpen,
+		penButton = null
 	}: Props = $props();
 
 	// The desk around the pages: warm paper with a dot grid. Pages stay white
@@ -906,10 +914,16 @@
 		}
 		// pen, mouse, or an inking finger
 		stopGlide();
+		const use = useFor(e);
+		// A pen touching down with its barrel button held reports the secondary
+		// button; its eraser end, button 5. Both are a pen contact, not a
+		// right-click — the barrel only when it's been given something to do.
+		const pen = e.pointerType === 'pen';
+		const contact = e.button === 0 || (pen && e.button === 5) || (pen && e.button === 2 && penButton !== null);
 		// Drag to move: the hand tool, Space held, the middle button, or any
 		// drag when this session can't draw anyway.
-		if (tool === 'hand' || spaceHeld || e.button === 1 || mode !== 'draw') {
-			if (e.button !== 0 && e.button !== 1) return;
+		if (use.tool === 'hand' || spaceHeld || e.button === 1 || mode !== 'draw') {
+			if (!contact && e.button !== 1) return;
 			e.preventDefault(); // no middle-click autoscroll
 			canvas.setPointerCapture(e.pointerId);
 			panPointerId = e.pointerId;
@@ -918,7 +932,7 @@
 			beginGesture();
 			return;
 		}
-		if (e.button !== 0) return;
+		if (!contact) return;
 		canvas.setPointerCapture(e.pointerId);
 		// The pen wins over whatever the hand started a moment ago.
 		if (touches.size > 0) {
@@ -931,7 +945,7 @@
 			touchInk = e.pointerId;
 			touchInkAt = local(e);
 		}
-		if (tool === 'laser') {
+		if (use.tool === 'laser') {
 			laserPointerId = e.pointerId;
 			onactive?.(true);
 			const at = local(e);
@@ -941,7 +955,7 @@
 			publishCursor(w); // so a pending throttled cursor can't send an older point
 			return;
 		}
-		if (tool === 'eraser') {
+		if (use.tool === 'eraser') {
 			erasePointerId = e.pointerId;
 			eraseStarted = false;
 			eraserCursor = local(e);
@@ -958,10 +972,10 @@
 		livePage = pageAt(noteStore.pages, w.x, w.y) ?? null;
 		liveStroke = {
 			id: uid(),
-			color,
-			width: strokeWidth,
+			color: use.color,
+			width: use.width,
 			points: [samplePoint(e)],
-			brush: tool === 'marker' || tool === 'brush' ? tool : 'pen',
+			brush: use.tool === 'marker' || use.tool === 'brush' ? use.tool : 'pen',
 			// A mouse has no pressure: let speed shape the line instead.
 			sim: e.pointerType !== 'pen',
 			// Smoothing works at the zoom it was drawn at (see ink.ts).
@@ -974,6 +988,17 @@
 		liveHoldUntil = finger ? inkStartedAt + FINGER_SETTLE_MS : 0;
 		sendLive();
 		markDirty();
+	}
+
+	/** What this pointer-down does: the tool, unless it's a pen's eraser end
+	 *  or a pen with its barrel button held. Decided once per stroke, so
+	 *  letting go of the button mid-stroke changes nothing. */
+	function useFor(e: PointerEvent): PenUse {
+		if (e.pointerType === 'pen') {
+			if (e.button === 5 || e.buttons & 32) return { tool: 'eraser', color, width: strokeWidth };
+			if (penButton && (e.button === 2 || e.buttons & 2)) return penButton;
+		}
+		return { tool, color, width: strokeWidth };
 	}
 
 	function onPointerMove(e: PointerEvent) {
