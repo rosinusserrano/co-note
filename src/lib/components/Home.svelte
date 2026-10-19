@@ -3,7 +3,7 @@
 	import { fly } from 'svelte/transition';
 	import Icon from './Icon.svelte';
 	import { createNote, joinNote, normalizeName, ApiError, VIEW_ACCESS as ACCESS, type ViewAccess } from '$lib/notes/api';
-	import { noteIndex, type NoteEntry } from '$lib/notes/noteIndex.svelte';
+	import { noteIndex, myName, setMyName, NAME_MAX, type NoteEntry } from '$lib/notes/noteIndex.svelte';
 	import { destroyNoteData } from '$lib/notes/noteStore.svelte';
 
 	interface Props {
@@ -18,6 +18,8 @@
 
 	// Seeded once from the link; after that the field is the user's.
 	let joinForm = $state({ name: untrack(() => joinName), passcode: '', busy: false, error: '' });
+	// Who you are to the others, shared by both forms and remembered on this device.
+	let me = $state(myName());
 	let createForm = $state({
 		name: '',
 		editPasscode: '',
@@ -35,6 +37,7 @@
 		joinForm.error = '';
 		try {
 			const session = await joinNote(joinForm.name, joinForm.passcode);
+			setMyName(me);
 			onopen(noteIndex.save(session).id);
 		} catch (err) {
 			joinForm.error = errorText(err);
@@ -55,6 +58,7 @@
 				viewAccess,
 				viewPasscode: viewAccess === 'passcode' ? viewPasscode : undefined
 			});
+			setMyName(me);
 			onopen(noteIndex.save(session).id);
 		} catch (err) {
 			createForm.error = errorText(err);
@@ -181,6 +185,13 @@
 				</button>
 			</div>
 
+			{#snippet yourName()}
+				<label class="field">
+					<span class="kicker">Your name <em class="opt">optional</em></span>
+					<input class="input" bind:value={me} maxlength={NAME_MAX} autocomplete="nickname" placeholder="How the others see you" />
+				</label>
+			{/snippet}
+
 			{#if tab === 'join'}
 				<form class="card" onsubmit={join}>
 					<h2>Join a note</h2>
@@ -193,6 +204,7 @@
 						<input class="input" type="password" bind:value={joinForm.passcode} autocomplete="off" />
 						<small>The editor or observer passcode you were given. Leave it empty if the note lets anyone watch.</small>
 					</label>
+					{@render yourName()}
 					{#if joinForm.error}<p class="error-text">{joinForm.error}</p>{/if}
 					<button class="btn primary go" disabled={joinForm.busy}>
 						{joinForm.busy ? 'Joining…' : 'Join note'}<span class="arrow">→</span>
@@ -229,6 +241,7 @@
 							<small>Anyone with this can watch, not draw.</small>
 						</label>
 					{/if}
+					{@render yourName()}
 					{#if createForm.error}<p class="error-text">{createForm.error}</p>{/if}
 					<button class="btn primary go" disabled={createForm.busy}>
 						{createForm.busy ? 'Creating…' : 'Create note'}<span class="arrow">→</span>
@@ -630,5 +643,14 @@
 		.card {
 			padding: 1.3rem 1.1rem 1.2rem;
 		}
+	}
+	/* "optional" beside a field's label: a quieter, handwritten aside. */
+	.opt {
+		margin-left: 0.4em;
+		font-family: var(--f-serif);
+		font-size: 0.95rem;
+		letter-spacing: 0;
+		text-transform: none;
+		color: var(--smoke);
 	}
 </style>

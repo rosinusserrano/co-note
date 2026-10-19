@@ -104,3 +104,26 @@ function isEntry(v: unknown): v is NoteEntry {
 }
 
 export const noteIndex = new NoteIndex();
+
+const NAME_KEY = 'conote:name';
+/** Longest name kept; presence labels are cut at 40 on the receiving side anyway. */
+export const NAME_MAX = 24;
+
+/** The name this device shows to others (cursor tag, people list); '' = none given. */
+export function myName(): string {
+	try {
+		return (localStorage.getItem(NAME_KEY) ?? '').slice(0, NAME_MAX);
+	} catch {
+		return '';
+	}
+}
+
+export function setMyName(name: string) {
+	const clean = name.replace(/\s+/g, ' ').trim().slice(0, NAME_MAX);
+	try {
+		if (clean) localStorage.setItem(NAME_KEY, clean);
+		else localStorage.removeItem(NAME_KEY);
+	} catch {
+		// Private mode: the name just won't be remembered.
+	}
+}

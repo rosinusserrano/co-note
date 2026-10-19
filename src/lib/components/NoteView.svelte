@@ -5,7 +5,7 @@
 	import NoteSettings from './NoteSettings.svelte';
 	import Icon, { type IconName } from './Icon.svelte';
 	import { noteStore, destroyNoteData } from '$lib/notes/noteStore.svelte';
-	import { noteIndex, type NoteEntry } from '$lib/notes/noteIndex.svelte';
+	import { noteIndex, myName, type NoteEntry } from '$lib/notes/noteIndex.svelte';
 	import { joinNote, ownerSession, ApiError, type NoteSession } from '$lib/notes/api';
 	import { Viewport, MAX_FIT_SCALE } from '$lib/notes/viewport.svelte';
 	import { PAGE_GAP } from '$lib/notes/pages';
@@ -193,10 +193,12 @@
 
 	onMount(() => {
 		noteIndex.touch(entry.id);
-		// How the others' screens label us: role, and a guess at the device.
+		// How the others' screens label us: the name given on joining, else
+		// role and a guess at the device.
 		const role = entry.ownerKey ? 'Owner' : canEdit ? 'Editor' : 'Observer';
 		const device = matchMedia('(pointer: coarse)').matches ? 'tablet' : 'computer';
-		noteStore.connect(entry.id, { token: entry.token, label: `${role} · ${device}`, owner: entry.ownerProof });
+		const label = myName() || `${role} · ${device}`;
+		noteStore.connect(entry.id, { token: entry.token, label, owner: entry.ownerProof });
 		// Owner devices from before pulls existed have the key but no proof yet.
 		if (entry.ownerKey && !entry.ownerProof) {
 			const id = entry.id;

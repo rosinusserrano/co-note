@@ -80,11 +80,16 @@ chosen device.
   ignored, a finger pans again after the grace time; a palm that landed before
   the pen stops counting; the canvas context menu is blocked; following glides
   over several frames.
-  Pull-glide round (12 checks, two editors): the owner's corner has *Bring
+  Names round (10 checks): both forms have an optional *Your name*; the
+  owner's people list, canvas cursor tag (only with others shown) and the
+  observer's focus chip and pulled notice use the names; remembered per
+  device; without one, `Role · device` as before.
+  Pull-glide round (13 checks, two editors): the owner's corner has *Bring
   everyone here* before focus (disabled alone, absent for other editors); a
   far, zoomed-in editor zooms out (195% → 20%) and back in to exactly the
   owner's view (pixel-identical), zoom only falling then rising, ~1.6 s; from
-  inside the target it only zooms out; a half-screen hop dips to 80%. The
+  inside the target it only zooms out; a half-screen hop dips to 80%; the
+  zoom slows to ~20% of its peak speed at the widest point. The
   path's math (endpoints exact, edges monotonic, shape kept) checked
   separately.
   Design round (21 checks, headless Chrome): chrome fades to 10% and lets the
@@ -389,7 +394,10 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   Without the field the peer count silently reads 1 for the first ~15s. Stroke
   sync is unaffected (different message type), which is what makes it easy to miss.
 - **Presence** = awareness fields `label`, `cursor` (world point or null) and
-  `view` (world rect this session shows). `DrawingCanvas` publishes them
+  `view` (world rect this session shows). `label` is the name typed on
+  joining/creating (optional, per device: `myName()` in `noteIndex`,
+  localStorage `conote:name`), else `"<Role> · <device>"`; it's what cursor
+  tags, view frames, the people list, focus chips and the pulled notice show. `DrawingCanvas` publishes them
   throttled (50 ms / 120 ms); `readPresence` validates other devices' states
   (they're untrusted) and picks each one's colour from its client id. Others'
   views are only *drawn* — never adopted — with two exceptions: pulls, below,
@@ -404,7 +412,9 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   under way. The glide **never slides**: the screen's edges move outward until
   the current view and the target are both in sight (`outerView`), then inward
   onto the target — each half one zoom about a fixed world point
-  (`zoomBetween`), progress eased in log-zoom, length from `PULL_MIN_MS` +
+  (`zoomBetween`). Each half eases in and out on its own (time split by its
+  share of the zoom), so the zoom rests at the widest point instead of
+  reversing at full speed. Length from `PULL_MIN_MS` +
   `PULL_MS_PER_EFOLD` × zoom travelled, capped at `PULL_MAX_MS`. A far jump
   goes far out; a target inside the current view is a plain zoom. This is the one time a
   device's viewport is set from outside — a one-shot jump by the owner; the

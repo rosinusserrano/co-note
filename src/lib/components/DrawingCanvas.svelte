@@ -96,9 +96,9 @@
 	const TRACK_TAU_MS = 110;
 	// Being pulled to a view (showView): the glide's length grows with how far
 	// it zooms out and back in (in e-folds of zoom), within these bounds.
-	const PULL_MIN_MS = 450;
-	const PULL_MS_PER_EFOLD = 380;
-	const PULL_MAX_MS = 1800;
+	const PULL_MIN_MS = 500;
+	const PULL_MS_PER_EFOLD = 480;
+	const PULL_MAX_MS = 2300;
 
 	let canvas: HTMLCanvasElement;
 	let ctx: CanvasRenderingContext2D | null = null;
@@ -1294,14 +1294,20 @@
 		const total = out + back;
 		if (total < 1e-4 && Math.abs(target.x - from.x) * to.scale < 0.5 && Math.abs(target.y - from.y) * to.scale < 0.5) return;
 		const duration = Math.min(PULL_MAX_MS, PULL_MIN_MS + PULL_MS_PER_EFOLD * total);
+		// Each half gets its share of the time by how much it zooms (log width),
+		// and eases in and out on its own: the zoom comes to rest at the widest
+		// point before turning back, instead of reversing at full speed.
+		const split = total < 1e-4 ? 1 : out / total;
+		const ease = (k: number) => (1 - Math.cos(Math.PI * k)) / 2;
 		const t0 = performance.now();
 		const step = (t: number) => {
 			const k = Math.min(1, (t - t0) / duration);
-			const e = k < 0.5 ? 4 * k ** 3 : 1 - (-2 * k + 2) ** 3 / 2; // ease in-out cubic
-			// Progress is measured in zoom (log width), so the speed reads evenly
-			// across both halves however unequal they are.
-			const u = e * total;
-			const r = total < 1e-4 ? zoomBetween(from, target, e) : u <= out ? zoomBetween(from, over, out > 0 ? u / out : 1) : zoomBetween(over, target, (u - out) / back);
+			const r =
+				total < 1e-4
+					? zoomBetween(from, target, ease(k))
+					: k < split
+						? zoomBetween(from, over, ease(k / split))
+						: zoomBetween(over, target, split < 1 ? ease((k - split) / (1 - split)) : 1);
 			viewport.scale = width / r.w;
 			viewport.offset = { x: -r.x * viewport.scale, y: -r.y * viewport.scale };
 			glide = k < 1 ? requestAnimationFrame(step) : 0;
