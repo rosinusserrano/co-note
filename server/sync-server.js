@@ -33,6 +33,7 @@ import * as awarenessProtocol from 'y-protocols/awareness';
 import * as encoding from 'lib0/encoding';
 import * as decoding from 'lib0/decoding';
 import * as registry from './registry.js';
+import * as zotero from './zotero.js';
 
 const PORT = Number(process.env.SYNC_PORT) || 5182;
 // Unset = all interfaces (LAN dev). Production sets 127.0.0.1: only Caddy talks to it.
@@ -260,6 +261,8 @@ const limits = {
 	register: { max: 5, windowMs: 60 * 60_000 },
 	// Signed-in calls (listing, forgetting): plenty, just not unbounded.
 	account: { max: 300, windowMs: 10 * 60_000 },
+	// Zotero relaying, per account and per address.
+	zotero: { max: 300, windowMs: 10 * 60_000 },
 	upload: { max: 30, windowMs: 60 * 60_000 }
 };
 /** @type {Map<string, { count: number, resetAt: number }>} */
@@ -378,6 +381,40 @@ const signedIn = (fn) => (body, account) => {
 	return fn(account, body);
 };
 
+// --- Zotero files -------------------------------------------------------------
+//
+//   POST /api/zotero/file  JSON { apiKey, userId, key, webdav? } → the PDF
+//   POST /api/zotero/save  [4-byte length][JSON meta][PDF bytes] → { key }
+//
+// Signed-in only. Credentials ride in the body, never a header or URL, so
+// they stay out of access logs.
+
+async function handleZoteroFile(req, res, path, reply, ip) {
+	if (req.method !== 'POST') return reply(405, { error: 'Use POST.' });
+	const auth = String(req.headers.authorization ?? '');
+	const account = auth.startsWith('Bearer ') ? registry.verifyAccount(auth.slice(7)) : null;
+	if (!account) return reply(401, { error: 'Please sign in again.' });
+	for (const key of [ip, `@${account.key}`]) {
+		if (overLimit('zotero', key)) return reply(429, { error: 'Too many Zotero requests. Try again later.' });
+		countAttempt('zotero', key);
+	}
+	if (path === '/api/zotero/file') {
+		const bytes = await zotero.file(await readJson(req));
+		res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': bytes.length, 'Cache-Control': 'no-store' });
+		return void res.end(bytes);
+	}
+	const raw = await readBody(req, zotero.MAX_PDF_BYTES + 65_536);
+	const n = raw.length >= 4 ? raw.readUInt32BE(0) : -1;
+	if (n < 0 || n > 16_384 || raw.length < 4 + n) return reply(400, { error: 'Malformed upload.' });
+	let meta;
+	try {
+		meta = JSON.parse(raw.subarray(4, 4 + n).toString('utf8'));
+	} catch {
+		return reply(400, { error: 'Malformed upload.' });
+	}
+	reply(200, await zotero.save(meta, raw.subarray(4 + n)));
+}
+
 /** route → [rate-limit bucket, handler(body, account)]. `account` is the
  *  signed-in account (from `Authorization: Bearer <account session>`), or
  *  null. A request that fails with 403 counts against the bucket; successful
@@ -394,6 +431,9 @@ const routes = {
 	'/api/account/notes': ['account', signedIn((account) => registry.accountNotes(account))],
 	'/api/account/forget': ['account', signedIn((account, body) => registry.forget(account, body))],
 	'/api/account/claim': ['owner', signedIn((account, body) => registry.claim(account, body))],
+	'/api/zotero/verify': ['zotero', signedIn((_a, body) => zotero.verify(body))],
+	'/api/zotero/search': ['zotero', signedIn((_a, body) => zotero.search(body))],
+	'/api/zotero/pdfs': ['zotero', signedIn((_a, body) => zotero.pdfs(body))],
 	'/api/owner/session': ['owner', (body, account) => registry.ownerSession(body, account)],
 	'/api/owner/settings': ['owner', async (body, account) => {
 		const { revoked, session } = await registry.updateSettings(body, account);
@@ -432,6 +472,15 @@ async function handleHttp(req, res) {
 			throw e;
 		}
 	}
+	if (path === '/api/zotero/file' || path === '/api/zotero/save') {
+		try {
+			return await handleZoteroFile(req, res, path, reply, clientIp(req));
+		} catch (e) {
+			if (e instanceof registry.HttpError) return reply(e.status, { error: e.message });
+			console.error('[sync] zotero failed:', e);
+			return reply(500, { error: 'Server error.' });
+		}
+	}
 	const route = routes[path];
 	if (!route) return reply(404, { error: 'Not found.' });
 	if (req.method !== 'POST') return reply(405, { error: 'Use POST.' });
@@ -448,7 +497,7 @@ async function handleHttp(req, res) {
 			name = bucket === 'join' ? registry.normalizeName(body.name) : String(body.name ?? '').trim().toLowerCase();
 			if (busy(nameBucket, name)) return;
 		}
-		if (bucket === 'create' || bucket === 'register' || bucket === 'account') countAttempt(bucket, ip);
+		if (['create', 'register', 'account', 'zotero'].includes(bucket)) countAttempt(bucket, ip);
 		const auth = String(req.headers.authorization ?? '');
 		const account = auth.startsWith('Bearer ') ? registry.verifyAccount(auth.slice(7)) : null;
 		reply(200, await handler(body, account));

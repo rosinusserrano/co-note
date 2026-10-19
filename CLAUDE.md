@@ -99,6 +99,16 @@ chosen device.
   the turn (never stopping). The
   path's math (endpoints exact, edges monotonic, shape kept) checked
   separately.
+  Zotero round (15 checks, fake Zotero API + file storage + WebDAV): signed
+  out, the panel asks for an account; an API key lists the library, search
+  narrows it; a paper's PDF imports; saving creates "A Paper (conote)" under
+  it with the ink data, saving again replaces that file; another account's
+  device opens it with the ink as strokes, erases one, saves — still one
+  attachment; WebDAV: a wrong password says so; the paper comes out of its
+  zip; saving puts `.zip` + `.prop` on WebDAV, item md5/mtime match the
+  .prop, nothing in Zotero storage. Plus the WebDAV address guard refusing
+  loopback, private, link-local, metadata, v4-mapped/NAT64 and decimal-IP
+  forms before connecting, and pre-account notes loading as kept.
   Editable-PDF round (10 + 1 checks): a PDF with an added page beside page
   1, pen and marker ink on both → export has the attachment, the layer, one
   marked ink stream per inked page; imported into a new note: same pages
@@ -362,6 +372,37 @@ must be preserved:
   the doc still being the open one. The close handler also ignores sockets that
   used an older token: after `renewToken()`, the old socket's late 4401 must not
   lock out the new one.
+
+### Zotero (`server/zotero.js`, `zotero.svelte.ts`, NoteView's Zotero panel)
+
+- **⋯ → From Zotero / Save to Zotero.** Signed-in only: the server relays
+  (Zotero storage and WebDAV servers like Koofr don't allow cross-origin
+  requests), so it must not be an open proxy. The device keeps the API key
+  (and WebDAV URL/user/password) in localStorage `conote:zotero`; requests
+  carry them in the **body** (never headers/URLs — access logs), the server
+  stores none. `/api/zotero/{verify,search,pdfs}` are JSON routes;
+  `/api/zotero/file` returns the PDF; `/api/zotero/save` takes
+  `[u32 length][JSON meta][PDF]`. Budget per IP and per account.
+- **Files:** Zotero storage via `/items/<key>/file` (download) and the
+  3-step upload (authorise with `If-None-Match: *` / `If-Match: <md5>`,
+  POST prefix+file+suffix, register). WebDAV: `<url>/zotero/<KEY>.zip` (the
+  PDF under its filename) + `<KEY>.prop` (`<properties version="1"><mtime>ms
+  </mtime><hash>md5</hash></properties>`), and the item's `md5`/`mtime` set
+  through the API (allowed for WebDAV libraries) — they must match, it's
+  how Zotero desktop decides its copy is current. `davBase` appends
+  `zotero/` like Zotero does, so users type what Zotero's settings show.
+- **WebDAV is the one user-chosen target:** https only, no credentials in
+  the URL, redirects not followed, and no private/loopback/link-local/
+  v4-in-v6 address — IP literals checked up front (Node skips `lookup` for
+  them), names checked in the socket's `lookup`. `CONOTE_DAV_ALLOW_PRIVATE=1`
+  and `CONOTE_ZOTERO_API` exist for tests only.
+- **The link:** importing from Zotero puts `meta.zotero` = `{ library,
+  parent, saved, title }` in the doc (`noteStore.zotero`); a save replaces
+  `saved` if it still exists, else creates `"<title> (conote)"` under
+  `parent` (or top-level). Opening a conote attachment (it carries
+  `conote.json`) sets `saved` to it, so a paper keeps one annotated copy
+  however often it moves between devices. Its ink reopens editable (see
+  *Exported PDFs reopen editable*).
 
 ### Direct links / P2P (`p2p.ts` + matchmaking in `server/sync-server.js`)
 

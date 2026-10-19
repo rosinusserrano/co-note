@@ -7,7 +7,21 @@
 	import { noteStore, destroyNoteData } from '$lib/notes/noteStore.svelte';
 	import { noteIndex, myName, isOwner, type NoteEntry } from '$lib/notes/noteIndex.svelte';
 	import { account } from '$lib/notes/account.svelte';
-	import { joinNote, ownerSession, claimNote, ApiError, type NoteSession } from '$lib/notes/api';
+	import {
+		joinNote,
+		ownerSession,
+		claimNote,
+		zoteroVerify,
+		zoteroSearch,
+		zoteroPdfs,
+		zoteroFile,
+		zoteroSave,
+		ApiError,
+		type NoteSession,
+		type ZoteroItem,
+		type ZoteroPdf
+	} from '$lib/notes/api';
+	import { zotero } from '$lib/notes/zotero.svelte';
 	import { Viewport, MAX_FIT_SCALE } from '$lib/notes/viewport.svelte';
 	import { PAGE_GAP } from '$lib/notes/pages';
 	import { BRUSHES, MARKER_ALPHA } from '$lib/notes/ink';
@@ -79,7 +93,7 @@
 	const owner = $derived(isOwner(entry));
 
 	/** Which floating panel is open. One at a time; a tap elsewhere closes it. */
-	let pop = $state<'' | 'people' | 'share' | 'more' | 'ink' | 'keep'>('');
+	let pop = $state<'' | 'people' | 'share' | 'more' | 'ink' | 'keep' | 'zotero'>('');
 	/** The button that opened the panel, and where its bar sits: panels hang
 	 *  off it toward the middle of the screen, wherever the bar was put. */
 	let popFrom = $state<{ r: DOMRect; g: DOMRect; a: Anchor } | null>(null);
@@ -359,7 +373,13 @@
 	// --- PDF ------------------------------------------------------------------
 
 	let pdfInput = $state<HTMLInputElement>();
-	let pdfBusy = $state<'' | 'import' | 'export'>('');
+	let pdfBusy = $state<'' | 'import' | 'export' | 'zotero-in' | 'zotero-out'>('');
+	const BUSY_TEXT = {
+		import: 'Importing PDF…',
+		export: 'Exporting PDF…',
+		'zotero-in': 'Fetching from Zotero…',
+		'zotero-out': 'Saving to Zotero…'
+	};
 	let pdfError = $state('');
 
 	async function importPdf(e: Event) {
@@ -398,6 +418,150 @@
 			setTimeout(() => URL.revokeObjectURL(url), 10_000);
 		} catch (err) {
 			pdfError = err instanceof Error ? `Export failed: ${err.message}` : 'Export failed.';
+		} finally {
+			pdfBusy = '';
+		}
+	}
+
+	// --- Zotero: papers in, annotated PDFs back out -------------------------------
+
+	zotero.load();
+	/** Setting up (or changing) the connection, rather than searching. */
+	let zoteroSetup = $state(!zotero.settings);
+	let zoteroForm = $state({ apiKey: '', storage: 'zotero' as 'zotero' | 'webdav', url: '', user: '', password: '', busy: false, error: '' });
+	let zoteroQuery = $state('');
+	let zoteroItems = $state<ZoteroItem[] | null>(null);
+	/** An item opened to pick one of its several PDFs. */
+	let zoteroOpen = $state<{ item: ZoteroItem; pdfs: ZoteroPdf[] } | null>(null);
+	let zoteroError = $state('');
+	let zoteroDone = $state('');
+	let zoteroSearchTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function openZotero(e: MouseEvent) {
+		zoteroSetup = !zotero.settings;
+		zoteroError = '';
+		toggle('zotero', e);
+		if (zotero.settings && account.signedIn && !zoteroItems) void findInZotero();
+	}
+
+	async function connectZotero(e: SubmitEvent) {
+		e.preventDefault();
+		const f = zoteroForm;
+		f.busy = true;
+		f.error = '';
+		try {
+			const key = f.apiKey.trim() || zotero.settings?.apiKey || '';
+			const who = await zoteroVerify(key);
+			if (!who.write) throw new Error('That key can only read. Give it write access too, so annotated PDFs can be saved back.');
+			const webdav = f.storage === 'webdav' ? { url: f.url.trim(), user: f.user.trim(), password: f.password } : undefined;
+			zotero.save({ apiKey: key, userId: who.userId, username: who.username, webdav });
+			f.apiKey = '';
+			f.password = '';
+			zoteroSetup = false;
+			zoteroItems = null;
+			await findInZotero();
+		} catch (err) {
+			f.error = err instanceof Error ? err.message : 'Something went wrong.';
+		} finally {
+			f.busy = false;
+		}
+	}
+
+	function editZotero() {
+		const z = zotero.settings;
+		zoteroForm.storage = z?.webdav ? 'webdav' : 'zotero';
+		zoteroForm.url = z?.webdav?.url ?? '';
+		zoteroForm.user = z?.webdav?.user ?? '';
+		zoteroSetup = true;
+	}
+
+	async function findInZotero() {
+		const z = zotero.settings;
+		if (!z) return;
+		zoteroError = '';
+		try {
+			zoteroItems = (await zoteroSearch(z, zoteroQuery.trim())).items;
+		} catch (err) {
+			zoteroError = err instanceof Error ? err.message : 'Search failed.';
+		}
+	}
+
+	function onZoteroQuery() {
+		clearTimeout(zoteroSearchTimer);
+		zoteroSearchTimer = setTimeout(findInZotero, 300);
+	}
+
+	async function pickZoteroItem(item: ZoteroItem) {
+		const z = zotero.settings;
+		if (!z) return;
+		zoteroError = '';
+		try {
+			const { pdfs } = await zoteroPdfs(z, item.key);
+			if (pdfs.length === 0) zoteroError = `"${item.title}" has no PDF stored in Zotero.`;
+			else if (pdfs.length === 1) await importFromZotero(item, pdfs[0]);
+			else zoteroOpen = { item, pdfs };
+		} catch (err) {
+			zoteroError = err instanceof Error ? err.message : 'Something went wrong.';
+		}
+	}
+
+	async function importFromZotero(item: ZoteroItem, pdf: ZoteroPdf) {
+		const z = zotero.settings;
+		if (!z) return;
+		pop = '';
+		zoteroOpen = null;
+		pdfBusy = 'zotero-in';
+		pdfError = '';
+		const hadPages = noteStore.pages.length > 0;
+		try {
+			const bytes = await zoteroFile(z, pdf.key);
+			const { conote } = await noteStore.importPdf(new Blob([bytes.slice()], { type: 'application/pdf' }));
+			// Remember where it came from, so saving goes back to that item —
+			// replacing this very attachment if it's one conote saved before.
+			if (!noteStore.zotero || noteStore.zotero.library !== z.userId) {
+				noteStore.setZoteroLink({
+					library: z.userId,
+					parent: pdf.parent ?? (item.key !== pdf.key ? item.key : null),
+					saved: conote ? pdf.key : null,
+					title: item.title.replace(/ \(conote\)$/, '') || pdf.title
+				});
+			}
+			if (!hadPages) {
+				follow = null;
+				fit();
+			}
+		} catch (err) {
+			pdfError = err instanceof Error ? err.message : 'Import failed.';
+		} finally {
+			pdfBusy = '';
+		}
+	}
+
+	async function saveToZotero(e: MouseEvent) {
+		const z = zotero.settings;
+		if (!z || !account.signedIn) return openZotero(e);
+		pop = '';
+		pdfBusy = 'zotero-out';
+		pdfError = '';
+		try {
+			const link = noteStore.zotero?.library === z.userId ? noteStore.zotero : null;
+			const title = link?.title || entry.name;
+			const bytes = await noteStore.exportPdf();
+			const { key } = await zoteroSave(
+				z,
+				{
+					key: link?.saved ?? undefined,
+					parent: link?.parent ?? undefined,
+					title: `${title} (conote)`,
+					filename: `${title.slice(0, 80)} (conote).pdf`
+				},
+				bytes
+			);
+			if (canEdit) noteStore.setZoteroLink({ library: z.userId, parent: link?.parent ?? null, saved: key, title });
+			zoteroDone = link?.saved === key ? 'Updated in Zotero' : link?.parent ? 'Saved to Zotero, attached to its paper' : 'Saved to Zotero';
+			setTimeout(() => (zoteroDone = ''), 4000);
+		} catch (err) {
+			pdfError = err instanceof Error ? `Zotero: ${err.message}` : 'Saving to Zotero failed.';
 		} finally {
 			pdfBusy = '';
 		}
@@ -1103,6 +1267,105 @@
 					</p>
 				</div>
 			</div>
+		{:else if pop === 'zotero'}
+			<div style={popStyle} class="pop corner-pop zotero" data-pop transition:scale={{ start: 0.96, duration: 160 }}>
+				<div class="pophead">
+					<span class="serif">Zotero</span>
+					{#if zotero.settings && !zoteroSetup}
+						<button class="mini" onclick={editZotero} title="Change the API key or file storage">{zotero.settings.username || 'Library'} · {zotero.settings.webdav ? 'WebDAV' : 'Zotero storage'}</button>
+					{/if}
+				</div>
+				{#if !account.signedIn}
+					<p class="fine">Zotero goes through this server (your browser can't reach Zotero's files directly), so it needs an account: just a name and a password.</p>
+					<form
+						class="stack"
+						onsubmit={async (e) => {
+							e.preventDefault();
+							keepForm.busy = true;
+							keepForm.error = '';
+							try {
+								await account.signIn(keepForm.name, keepForm.password, false);
+								if (zotero.settings) void findInZotero();
+							} catch (err) {
+								keepForm.error = err instanceof Error ? err.message : 'Something went wrong.';
+							} finally {
+								keepForm.busy = false;
+							}
+						}}
+					>
+						<input class="input" bind:value={keepForm.name} placeholder="Name" autocomplete="username" autocapitalize="none" spellcheck="false" required />
+						<input class="input" type="password" bind:value={keepForm.password} placeholder="Password" autocomplete="current-password" required />
+						{#if keepForm.error}<p class="err-dark">{keepForm.error}</p>{/if}
+						<button class="btn primary" disabled={keepForm.busy}>Sign in</button>
+					</form>
+				{:else if zoteroSetup}
+					<form class="stack" onsubmit={connectZotero}>
+						<p class="fine">
+							Make an API key at <a href="https://www.zotero.org/settings/keys/new" target="_blank" rel="noreferrer">zotero.org/settings/keys</a>
+							with <b>library access</b> and <b>write access</b>. It stays on this device.
+						</p>
+						<input
+							class="input mono"
+							bind:value={zoteroForm.apiKey}
+							placeholder={zotero.settings ? 'API key (unchanged if empty)' : 'API key'}
+							autocomplete="off"
+							spellcheck="false"
+							required={!zotero.settings}
+						/>
+						<div class="seg" role="radiogroup" aria-label="Where Zotero keeps the files">
+							<label><input type="radio" value="zotero" bind:group={zoteroForm.storage} />Zotero storage</label>
+							<label><input type="radio" value="webdav" bind:group={zoteroForm.storage} />WebDAV</label>
+						</div>
+						{#if zoteroForm.storage === 'webdav'}
+							<p class="fine">As in Zotero's Sync settings. Koofr: <span class="mono">app.koofr.net/dav/Koofr</span>, your Koofr e-mail, and an app password (Koofr → Preferences → Password).</p>
+							<input class="input" bind:value={zoteroForm.url} placeholder="WebDAV URL" autocomplete="off" autocapitalize="none" spellcheck="false" required />
+							<input class="input" bind:value={zoteroForm.user} placeholder="User name" autocomplete="off" autocapitalize="none" spellcheck="false" />
+							<input class="input" type="password" bind:value={zoteroForm.password} placeholder="Password" autocomplete="off" required />
+						{/if}
+						{#if zoteroForm.error}<p class="err-dark">{zoteroForm.error}</p>{/if}
+						<div class="row2">
+							<button class="btn primary" disabled={zoteroForm.busy}>{zoteroForm.busy ? 'Checking…' : 'Connect'}</button>
+							{#if zotero.settings}
+								<button type="button" class="btn" onclick={() => (zoteroSetup = false)}>Cancel</button>
+								<button
+									type="button"
+									class="btn"
+									onclick={() => {
+										zotero.clear();
+										zoteroItems = null;
+									}}>Disconnect</button
+								>
+							{/if}
+						</div>
+					</form>
+				{:else if zoteroOpen}
+					<button class="mini back" onclick={() => (zoteroOpen = null)}>← {zoteroOpen.item.title}</button>
+					<ul class="zlist">
+						{#each zoteroOpen.pdfs as p (p.key)}
+							<li><button onclick={() => importFromZotero(zoteroOpen!.item, p)}><span class="zt">{p.title || p.filename}</span><span class="kicker">{p.filename}</span></button></li>
+						{/each}
+					</ul>
+				{:else}
+					<input class="input" bind:value={zoteroQuery} oninput={onZoteroQuery} placeholder="Search title, author, year" autocomplete="off" spellcheck="false" />
+					{#if zoteroItems === null}
+						<p class="fine">Searching…</p>
+					{:else if zoteroItems.length === 0}
+						<p class="fine">Nothing found.</p>
+					{:else}
+						<ul class="zlist">
+							{#each zoteroItems as it (it.key)}
+								<li>
+									<button onclick={() => pickZoteroItem(it)} disabled={it.children === 0}>
+										<span class="zt">{it.title || 'Untitled'}</span>
+										<span class="kicker">{[it.creators, it.year].filter(Boolean).join(' · ') || ' '}</span>
+									</button>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				{/if}
+				{#if zoteroError}<p class="err-dark">{zoteroError}</p>{/if}
+			</div>
 		{:else if pop === 'keep'}
 			<form
 				style={popStyle}
@@ -1161,6 +1424,22 @@
 				{/if}
 				<button class="item" disabled={pdfBusy !== ''} onclick={exportPdf}>
 					<Icon name="fileDown" size={18} /><span>Export PDF</span><span class="kicker">with ink</span>
+				</button>
+				{#if canEdit}
+					<button class="item" data-pop disabled={pdfBusy !== ''} onclick={openZotero}>
+						<Icon name="book" size={18} /><span>From Zotero</span><span class="kicker">open a paper</span>
+					</button>
+				{/if}
+				<button
+					class="item"
+					data-pop
+					disabled={pdfBusy !== ''}
+					onclick={saveToZotero}
+					title="Save the note as a PDF in your Zotero library, editable again when opened here"
+				>
+					<Icon name="bookUp" size={18} /><span>Save to Zotero</span><span class="kicker"
+						>{noteStore.zotero?.saved && noteStore.zotero.library === zotero.settings?.userId ? 'update' : noteStore.zotero?.parent ? 'attach' : 'new'}</span
+					>
 				</button>
 				{#if noteStore.pages.length > 0}
 					<span class="kicker sect">Pages</span>
@@ -1336,7 +1615,13 @@
 		{#if pdfBusy}
 			<div class="notice" role="status" transition:fly={{ y: -12, duration: 220 }}>
 				<span class="spinner"></span>
-				<span>{pdfBusy === 'import' ? 'Importing PDF…' : 'Exporting PDF…'}</span>
+				<span>{BUSY_TEXT[pdfBusy]}</span>
+			</div>
+		{/if}
+		{#if zoteroDone}
+			<div class="notice" role="status" transition:fly={{ y: -12, duration: 220 }}>
+				<span class="kicker lime">Zotero</span>
+				<span>{zoteroDone}</span>
 			</div>
 		{/if}
 		{#if pdfError}
@@ -2386,6 +2671,68 @@
 	.unsaved {
 		color: var(--amber);
 	}
+	.stack {
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+	}
+	.zotero .seg {
+		background: var(--paper-2);
+	}
+	.zotero a {
+		color: inherit;
+		text-decoration-color: var(--lime-deep);
+		text-decoration-thickness: 2px;
+	}
+	.mono {
+		font-family: var(--f-mono);
+		font-size: 0.85em;
+	}
+	.zotero .back {
+		align-self: flex-start;
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.zlist {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		max-height: 22rem;
+		overflow-y: auto;
+		touch-action: pan-y;
+	}
+	.zlist button {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 0.2rem;
+		width: 100%;
+		padding: 0.55rem 0.5rem;
+		border: none;
+		border-top: 1px dashed var(--rule);
+		background: none;
+		text-align: left;
+		cursor: pointer;
+		border-radius: 8px;
+	}
+	.zlist li:first-child button {
+		border-top: none;
+	}
+	.zlist button:hover:not(:disabled) {
+		background: var(--paper);
+	}
+	.zt {
+		font-size: 0.9rem;
+		line-height: 1.25;
+	}
+	.zlist .kicker {
+		color: var(--graphite);
+		font-size: 0.58rem;
+	}
+	.zotero .row2,
 	.keep .row2 {
 		display: flex;
 		gap: 0.5rem;

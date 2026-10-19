@@ -40,6 +40,23 @@ export type SyncStatus = 'offline' | 'connecting' | 'connected' | 'disconnected'
  *  everyone had left. Either way we stop reconnecting. */
 export type Access = 'ok' | 'revoked' | 'gone' | 'ended';
 
+/** Where this note's paper lives in Zotero (shared in the doc's meta): the
+ *  library, the item its PDF came from, and the attachment it was last saved
+ *  to, which the next save replaces. */
+export interface ZoteroLink {
+	library: string;
+	parent: string | null;
+	saved: string | null;
+	title: string;
+}
+
+function readZoteroLink(v: unknown): ZoteroLink | null {
+	const z = v as Partial<ZoteroLink> | null | undefined;
+	const key = (k: unknown) => (typeof k === 'string' && /^[A-Z0-9]{8}$/.test(k) ? k : null);
+	if (!z || typeof z.library !== 'string' || !/^[0-9]{1,12}$/.test(z.library)) return null;
+	return { library: z.library, parent: key(z.parent), saved: key(z.saved), title: String(z.title ?? '').slice(0, 300) };
+}
+
 /** Another session on this note, as it last told us. World coordinates. */
 export interface Presence {
 	/** Awareness client id: stable for the session, picks its color. */
@@ -202,6 +219,8 @@ class NoteStore {
 	status = $state<SyncStatus>('offline');
 	peers = $state(1); // this device + connected others
 	access = $state<Access>('ok');
+	/** Where the note's paper lives in Zotero, if it came from there or was saved there. */
+	zotero = $state<ZoteroLink | null>(null);
 	/** Other sessions on this note (not us). Replaced wholesale on change. */
 	presence = $state.raw<Presence[]>([]);
 	/** The latest pull from the owner (only the owner's connection can send
@@ -565,6 +584,7 @@ class NoteStore {
 		this.direct = 0;
 		this.hub = false;
 		this.pages = [];
+		this.zotero = null;
 		this.layout = 'vertical';
 		this.revision++; // repaint the now-empty canvas
 	}
@@ -633,9 +653,9 @@ class NoteStore {
 	 * device that opens the note. Throws ApiError / Error with a message for
 	 * the user. One undo step.
 	 */
-	async importPdf(file: Blob) {
+	async importPdf(file: Blob): Promise<{ conote: boolean }> {
 		const doc = this.#doc;
-		if (!doc) return;
+		if (!doc) return { conote: false };
 		const id = this.id;
 		const bytes = new Uint8Array(await file.arrayBuffer());
 		const { readPdfPages } = await import('./pdf');
@@ -648,7 +668,7 @@ class NoteStore {
 		}
 		const hash = await uploadFile(id, this.#token, bytes);
 		await cacheFile(id, hash, bytes);
-		if (this.#doc !== doc) return; // switched notes meanwhile
+		if (this.#doc !== doc) return { conote: false }; // switched notes meanwhile
 		const pages = this.#pages!;
 		const meta = this.#meta!;
 		const arr = this.#arr!;
@@ -682,6 +702,7 @@ class NoteStore {
 				arr.push(conote.strokes.map((s) => ({ ...s, id: uid(), page: ids[s.page] })));
 			}
 		});
+		return { conote: conote !== null };
 	}
 
 	/** Add a blank page, the size of `afterId`, right after it: beside it in
@@ -720,6 +741,10 @@ class NoteStore {
 		this.#meta?.set('layout', layout);
 	}
 
+	setZoteroLink(link: ZoteroLink) {
+		this.#meta?.set('zotero', link);
+	}
+
 	/** The note as a PDF (see exportPdf.ts). */
 	async exportPdf(): Promise<Uint8Array> {
 		const { exportPdf } = await import('./exportPdf');
@@ -732,6 +757,7 @@ class NoteStore {
 		const layout = this.#meta?.get('layout') === 'horizontal' ? 'horizontal' : 'vertical';
 		const origin = this.#meta?.get('origin') as { x: number; y: number } | undefined;
 		this.layout = layout;
+		this.zotero = readZoteroLink(this.#meta?.get('zotero'));
 		this.pages = layoutPages(
 			this.#pages?.toArray() ?? [],
 			layout,

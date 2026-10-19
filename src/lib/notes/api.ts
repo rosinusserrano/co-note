@@ -98,6 +98,72 @@ export const updateSettings = (body: {
 export const deleteNote = (id: string, ownerKey?: string) =>
 	post<{ ok: true }>('/owner/delete', { id, ownerKey });
 
+// --- Zotero (relayed by the server, signed in only; see server/zotero.js) -----------
+
+export interface ZoteroCreds {
+	apiKey: string;
+	userId: string;
+	/** Set when the library's files sync over WebDAV instead of Zotero storage. */
+	webdav?: { url: string; user: string; password: string };
+}
+export interface ZoteroItem {
+	key: string;
+	title: string;
+	creators: string;
+	year: string;
+	children: number;
+}
+export interface ZoteroPdf {
+	key: string;
+	title: string;
+	filename: string;
+	parent: string | null;
+}
+
+export const zoteroVerify = (apiKey: string) =>
+	post<{ userId: string; username: string; write: boolean }>('/zotero/verify', { apiKey });
+export const zoteroSearch = (c: ZoteroCreds, q: string) => post<{ items: ZoteroItem[] }>('/zotero/search', { ...c, q });
+export const zoteroPdfs = (c: ZoteroCreds, key: string) => post<{ pdfs: ZoteroPdf[] }>('/zotero/pdfs', { ...c, key });
+
+async function binary(path: string, body: BodyInit, json: boolean): Promise<Response> {
+	let res: Response;
+	try {
+		res = await fetch(apiBase() + path, {
+			method: 'POST',
+			headers: {
+				...(json ? { 'Content-Type': 'application/json' } : { 'Content-Type': 'application/octet-stream' }),
+				...(accountSession ? { Authorization: `Bearer ${accountSession}` } : {})
+			},
+			body
+		});
+	} catch {
+		throw new ApiError("Can't reach the server. Check your connection.");
+	}
+	if (res.ok) return res;
+	const data = await res.json().catch(() => ({}));
+	if (res.status === 401) throw new SignedOutError(data.error ?? 'Please sign in again.');
+	throw new ApiError(data.error ?? `Server error (${res.status}).`);
+}
+
+export async function zoteroFile(c: ZoteroCreds, key: string): Promise<Uint8Array> {
+	const res = await binary('/zotero/file', JSON.stringify({ ...c, key }), true);
+	return new Uint8Array(await res.arrayBuffer());
+}
+
+/** Save a PDF as an attachment: replacing `key` if it's still there, else new under `parent`. */
+export async function zoteroSave(
+	c: ZoteroCreds,
+	meta: { key?: string; parent?: string; title: string; filename: string },
+	pdf: Uint8Array
+): Promise<{ key: string }> {
+	const head = new TextEncoder().encode(JSON.stringify({ ...c, ...meta }));
+	const body = new Uint8Array(4 + head.length + pdf.length);
+	new DataView(body.buffer).setUint32(0, head.length);
+	body.set(head, 4);
+	body.set(pdf, 4 + head.length);
+	return (await binary('/zotero/save', body, false)).json();
+}
+
 // --- Accounts ----------------------------------------------------------------------
 
 export interface AccountSession {
