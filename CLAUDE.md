@@ -99,6 +99,14 @@ chosen device.
   the turn (never stopping). The
   path's math (endpoints exact, edges monotonic, shape kept) checked
   separately.
+  Editable-PDF round (10 + 1 checks): a PDF with an added page beside page
+  1, pen and marker ink on both → export has the attachment, the layer, one
+  marked ink stream per inked page; imported into a new note: same pages
+  laid out the same, the canvas pixel-identical to the original; *Clear all
+  ink* leaves bare pages identical to before inking (the drawn copy is
+  hidden), undo restores; edited and exported again: still one ink stream per
+  page; a third note importing that matches pixel for pixel; a plain PDF
+  imports as before; pdf.js with default settings (any viewer) shows the ink.
   Accounts round (21 checks, grace cut to 6 s): signed out, the New note
   form warns and the note shows *unsaved*; a signed-in editor joining it
   doesn't save it — it survives inside the grace time and is gone after
@@ -423,6 +431,18 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   `$CONOTE_DATA/files/<id>/`, removed with the note. Clients cache them in
   IndexedDB (`conote-files`, key `<id>/<hash>`; dropped by `destroyNoteData`),
   so PDFs open offline. `importPdf` validates with pdf.js *before* uploading.
+- **Exported PDFs reopen editable** (`conoteData.ts`). The export embeds
+  `conote.json` (page `extra` flags, layout, every on-page stroke page-local
+  with its PDF page index; a page-less note's free ink moved onto its fitted
+  page) and draws the ink as one content stream per page marked
+  `/ConoteInk true`, inside an optional-content layer *conote ink*. Importing
+  such a PDF (`readPdfPages` → `readConoteData`, which validates everything —
+  it's a file) adds its pages with their `extra` flags and the strokes as
+  ordinary strokes, one undo step; `PageRenderer` hides that layer whenever
+  it renders a page (`withoutConoteInk`), and export drops marked streams
+  from copied pages before drawing the ink again — so ink is never drawn
+  twice, however many round trips. Other viewers show the layer as normal.
+  Keep the marker key and layer name stable: old exports depend on them.
 - pdf.js and pdf-lib are dynamic imports; notes without PDFs never load them.
   The pdf.js worker (`.mjs`) is in the PWA precache.
 

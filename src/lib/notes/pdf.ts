@@ -11,6 +11,7 @@
 
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import type { PlacedPage } from './pages';
+import { CONOTE_FILE, CONOTE_LAYER, readConoteData, type ConoteData } from './conoteData';
 
 type PdfJs = typeof import('pdfjs-dist');
 let lib: Promise<PdfJs> | null = null;
@@ -35,19 +36,40 @@ export interface PdfPageInfo {
 	vt: number[];
 }
 
-/** Page sizes (rotation and crop box applied) of a PDF, for importing it. */
-export async function readPdfPages(bytes: Uint8Array): Promise<PdfPageInfo[]> {
+/** Page sizes (rotation and crop box applied) of a PDF, for importing it,
+ *  and the ink it carries if conote exported it. */
+export async function readPdfPages(bytes: Uint8Array): Promise<{ pages: PdfPageInfo[]; conote: ConoteData | null }> {
 	const doc = await open(bytes);
 	try {
-		const out: PdfPageInfo[] = [];
+		const pages: PdfPageInfo[] = [];
 		for (let i = 1; i <= doc.numPages; i++) {
 			const vp = (await doc.getPage(i)).getViewport({ scale: 1 });
-			out.push({ w: vp.width, h: vp.height, vt: [...vp.transform] });
+			pages.push({ w: vp.width, h: vp.height, vt: [...vp.transform] });
 		}
-		return out;
+		let conote: ConoteData | null = null;
+		try {
+			const files = (await doc.getAttachments()) as Record<string, { filename: string; content: Uint8Array }> | null;
+			const file = files && Object.values(files).find((f) => f.filename === CONOTE_FILE);
+			if (file) conote = readConoteData(JSON.parse(new TextDecoder().decode(file.content)), pages.length);
+		} catch {
+			/* unreadable: import it as a plain PDF */
+		}
+		return { pages, conote };
 	} finally {
 		void doc.destroy();
 	}
+}
+
+/** Rendering options that hide conote's own ink layer (it's drawn as strokes instead). */
+async function withoutConoteInk(doc: PDFDocumentProxy) {
+	const config = await doc.getOptionalContentConfig();
+	let found = false;
+	for (const [id, group] of Object.entries(config.getGroups() ?? {})) {
+		if ((group as { name?: string }).name !== CONOTE_LAYER) continue;
+		config.setVisibility(id, false);
+		found = true;
+	}
+	return found ? config : null;
 }
 
 /** A rendered region of a page: page-local rect, at `scale` device px per unit. */
@@ -78,6 +100,8 @@ export class PageRenderer {
 	#getBytes: (hash: string) => Promise<Uint8Array>;
 	#onUpdate: () => void;
 	#docs = new Map<string, Promise<PDFDocumentProxy | null>>();
+	/** Per file: optional content with conote's ink layer off, if it has one. */
+	#oc = new Map<string, Promise<Awaited<ReturnType<typeof withoutConoteInk>>>>();
 	#pages = new Map<string, PageState>();
 	#failed = new Set<string>();
 	#destroyed = false;
@@ -174,6 +198,9 @@ export class PageRenderer {
 		try {
 			const doc = await this.#doc(page.pdf.file);
 			if (!doc || this.#destroyed) return;
+			let oc = this.#oc.get(page.pdf.file);
+			if (!oc) this.#oc.set(page.pdf.file, (oc = withoutConoteInk(doc).catch(() => null)));
+			const config = await oc;
 			const pp = await doc.getPage(page.pdf.index + 1);
 			const canvas = document.createElement('canvas');
 			canvas.width = Math.max(1, Math.ceil(t.rw * t.scale));
@@ -184,7 +211,8 @@ export class PageRenderer {
 				canvasContext: ctx,
 				viewport: pp.getViewport({ scale: t.scale }),
 				// Shift so the region's corner lands at the canvas origin.
-				transform: [1, 0, 0, 1, -t.rx * t.scale, -t.ry * t.scale]
+				transform: [1, 0, 0, 1, -t.rx * t.scale, -t.ry * t.scale],
+				...(config ? { optionalContentConfigPromise: Promise.resolve(config) } : {})
 			}).promise;
 			if (this.#destroyed) return;
 			// The canvas was rounded up to whole pixels; keep the mapping exact.

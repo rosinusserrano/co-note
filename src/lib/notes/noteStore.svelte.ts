@@ -651,6 +651,11 @@ class NoteStore {
 		if (this.#doc !== doc) return; // switched notes meanwhile
 		const pages = this.#pages!;
 		const meta = this.#meta!;
+		const arr = this.#arr!;
+		// A PDF conote exported: its pages as they were (added ones beside
+		// their page), and its ink back as strokes.
+		const conote = info.conote;
+		const ids = info.pages.map(() => uid());
 		this.beginChange();
 		doc.transact(() => {
 			// The first pages go below (or beside) any ink already there, not over it.
@@ -663,9 +668,19 @@ class NoteStore {
 					);
 				}
 			}
+			if (conote && pages.length === 0) meta.set('layout', conote.layout);
 			pages.push(
-				info.map((p, index) => ({ id: uid(), w: p.w, h: p.h, extra: false, pdf: { file: hash, index, vt: p.vt } }))
+				info.pages.map((p, index) => ({
+					id: ids[index],
+					w: p.w,
+					h: p.h,
+					extra: index > 0 && !!conote?.pages[index].extra,
+					pdf: { file: hash, index, vt: p.vt }
+				}))
 			);
+			if (conote && conote.strokes.length > 0) {
+				arr.push(conote.strokes.map((s) => ({ ...s, id: uid(), page: ids[s.page] })));
+			}
 		});
 	}
 
@@ -708,7 +723,7 @@ class NoteStore {
 	/** The note as a PDF (see exportPdf.ts). */
 	async exportPdf(): Promise<Uint8Array> {
 		const { exportPdf } = await import('./exportPdf');
-		return exportPdf(this.#pages?.toArray() ?? [], this.#cache, (h) => this.fileBytes(h));
+		return exportPdf(this.#pages?.toArray() ?? [], this.#cache, (h) => this.fileBytes(h), this.layout);
 	}
 
 	#refresh() {

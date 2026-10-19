@@ -7,11 +7,21 @@
 // in a note that has pages (drawn beside them) isn't on any page, so it isn't
 // exported.
 //
+// The PDF also carries the ink as conote data (`conote.json`, an embedded
+// file, see ConoteData), so opening it in conote again — on any device, or
+// after a trip through Zotero — brings the ink back as strokes you can keep
+// editing, not as part of the page. For that the drawn ink sits in its own
+// content stream (marked `/ConoteInk true`) inside an optional-content layer
+// "conote ink": conote hides that layer when it renders such a page, and an
+// export strips those streams from copied pages before drawing the ink anew.
+// Other PDF viewers just show the ink.
+//
 // pdf-lib is loaded on first use.
 
-import type { PDFDocument, PDFPage, PDFOperator } from 'pdf-lib';
-import type { PageEntry, Stroke } from './model';
+import type { PDFDocument, PDFPage, PDFOperator, PDFRef } from 'pdf-lib';
+import type { PageEntry, PageLayout, Stroke } from './model';
 import { inkShape, hexToRgb, isMarker, MARKER_ALPHA, type InkRun } from './ink';
+import { CONOTE_FILE, CONOTE_LAYER, type ConoteData } from './conoteData';
 
 type Mat = [number, number, number, number, number, number];
 
@@ -26,11 +36,38 @@ const MARGIN = 24;
 export async function exportPdf(
 	pages: PageEntry[],
 	strokes: Stroke[],
-	getFile: (hash: string) => Promise<Uint8Array>
+	getFile: (hash: string) => Promise<Uint8Array>,
+	layout: PageLayout = 'vertical'
 ): Promise<Uint8Array> {
 	const lib = await import('pdf-lib');
 	const out = await lib.PDFDocument.create();
 	out.setProducer('conote');
+	const ctx = out.context;
+	const { PDFName, PDFHexString, PDFArray, PDFStream } = lib;
+
+	// The layer the ink is drawn in (see the header).
+	const layer = ctx.register(ctx.obj({ Type: 'OCG', Name: PDFHexString.fromText(CONOTE_LAYER) }));
+	out.catalog.set(PDFName.of('OCProperties'), ctx.obj({ OCGs: [layer], D: { Order: [layer] } }));
+
+	/** The ink again, as data: per page in export order. */
+	const data: ConoteData = { v: 1, layout, pages: [], strokes: [] };
+	const keep = (s: Stroke, page: number, dx = 0, dy = 0) =>
+		data.strokes.push({
+			color: s.color,
+			width: s.width,
+			...(s.brush ? { brush: s.brush } : {}),
+			...(s.sim ? { sim: true } : {}),
+			...(s.z ? { z: s.z } : {}),
+			page,
+			points: s.points.map((p) => ({ x: round(p.x + dx, 100), y: round(p.y + dy, 100), pressure: round(p.pressure, 1000) }))
+		});
+	const finish = async () => {
+		await out.attach(new TextEncoder().encode(JSON.stringify(data)), CONOTE_FILE, {
+			mimeType: 'application/json',
+			description: 'The ink, for opening this PDF in conote and drawing on'
+		});
+		return out.save();
+	};
 
 	const onPage = new Map<string, Stroke[]>();
 	for (const s of strokes) {
@@ -49,9 +86,12 @@ export async function exportPdf(
 			const w = b.x1 - b.x0 + 2 * MARGIN;
 			const h = b.y1 - b.y0 + 2 * MARGIN;
 			const page = out.addPage([w, h]);
-			drawInk(lib, page, free, [1, 0, 0, -1, MARGIN - b.x0, h - MARGIN + b.y0]);
+			drawInk(lib, page, free, [1, 0, 0, -1, MARGIN - b.x0, h - MARGIN + b.y0], layer);
+			// Reopened, it's ink on this page: page-local, from its top-left.
+			data.pages.push({ extra: false });
+			for (const s of free) keep(s, 0, MARGIN - b.x0, MARGIN - b.y0);
 		}
-		return out.save();
+		return finish();
 	}
 
 	// Copy each source file's pages in one go, so resources they share (fonts,
@@ -61,10 +101,21 @@ export async function exportPdf(
 	const copied = new Map<string, PDFPage[]>();
 	for (const [file, indices] of wanted) {
 		const src: PDFDocument = await lib.PDFDocument.load(await getFile(file), { ignoreEncryption: true });
-		copied.set(file, await out.copyPages(src, indices));
+		const list = await out.copyPages(src, indices);
+		// A page from an earlier conote export: its old ink comes back as
+		// strokes, so the drawn copy of it goes.
+		for (const page of list) {
+			const contents = page.node.Contents();
+			if (!(contents instanceof PDFArray)) continue;
+			for (let i = contents.size() - 1; i >= 0; i--) {
+				const stream = ctx.lookup(contents.get(i));
+				if (stream instanceof PDFStream && stream.dict.get(PDFName.of(INK_MARK))) contents.remove(i);
+			}
+		}
+		copied.set(file, list);
 	}
 
-	for (const p of pages) {
+	for (const [index, p] of pages.entries()) {
 		let page: PDFPage;
 		let m: Mat;
 		if (p.pdf) {
@@ -74,10 +125,17 @@ export async function exportPdf(
 			page = out.addPage([p.w, p.h]);
 			m = [1, 0, 0, -1, 0, p.h]; // page-local is y-down from the top-left
 		}
-		drawInk(lib, page, onPage.get(p.id) ?? [], m);
+		drawInk(lib, page, onPage.get(p.id) ?? [], m, layer);
+		data.pages.push({ extra: p.extra });
+		for (const s of onPage.get(p.id) ?? []) keep(s, index);
 	}
-	return out.save();
+	return finish();
 }
+
+const round = (v: number, k: number) => Math.round(v * k) / k;
+
+/** The key that marks a content stream as conote's ink. */
+const INK_MARK = 'ConoteInk';
 
 function bounds(strokes: Stroke[]) {
 	let x0 = Infinity;
@@ -99,7 +157,7 @@ function bounds(strokes: Stroke[]) {
 /** Bézier circle constant. */
 const K = 0.5522847498;
 
-function drawInk(lib: typeof import('pdf-lib'), page: PDFPage, strokes: Stroke[], m: Mat) {
+function drawInk(lib: typeof import('pdf-lib'), page: PDFPage, strokes: Stroke[], m: Mat, layer: PDFRef) {
 	if (strokes.length === 0) return;
 	const {
 		pushGraphicsState,
@@ -181,7 +239,16 @@ function drawInk(lib: typeof import('pdf-lib'), page: PDFPage, strokes: Stroke[]
 		}
 	};
 
+	// The page's name for the layer, for the marked-content operator below.
+	const ctx = page.doc.context;
+	const { PDFName, PDFDict, PDFOperator: Op } = lib;
+	const { Resources } = page.node.normalizedEntries();
+	let props = Resources.lookupMaybe(PDFName.of('Properties'), PDFDict);
+	if (!props) Resources.set(PDFName.of('Properties'), (props = ctx.obj({})));
+	props.set(PDFName.of(INK_MARK), layer);
+
 	const ops: PDFOperator[] = [
+		Op.of('BDC' as never, [PDFName.of('OC'), PDFName.of(INK_MARK)]),
 		pushGraphicsState(),
 		concatTransformationMatrix(...m),
 		setLineCap(LineCapStyle.Round),
@@ -199,7 +266,8 @@ function drawInk(lib: typeof import('pdf-lib'), page: PDFPage, strokes: Stroke[]
 	}
 	strokes.filter((s) => !isMarker(s)).forEach(draw);
 
-	ops.push(popGraphicsState());
-	// Spread in chunks: a big drawing is far more operators than a call can take.
-	for (let i = 0; i < ops.length; i += 5000) page.pushOperators(...ops.slice(i, i + 5000));
+	ops.push(popGraphicsState(), Op.of('EMC' as never));
+	// A stream of its own, marked, after the page's own content (normalize
+	// wraps that in q/Q first, so its leftover state can't touch the ink).
+	page.node.addContentStream(ctx.register(ctx.contentStream(ops, { [INK_MARK]: true })));
 }
