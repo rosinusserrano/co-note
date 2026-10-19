@@ -5,8 +5,9 @@
 	import NoteSettings from './NoteSettings.svelte';
 	import Icon, { type IconName } from './Icon.svelte';
 	import { noteStore, destroyNoteData } from '$lib/notes/noteStore.svelte';
-	import { noteIndex, myName, type NoteEntry } from '$lib/notes/noteIndex.svelte';
-	import { joinNote, ownerSession, ApiError, type NoteSession } from '$lib/notes/api';
+	import { noteIndex, myName, isOwner, type NoteEntry } from '$lib/notes/noteIndex.svelte';
+	import { account } from '$lib/notes/account.svelte';
+	import { joinNote, ownerSession, claimNote, ApiError, type NoteSession } from '$lib/notes/api';
 	import { Viewport, MAX_FIT_SCALE } from '$lib/notes/viewport.svelte';
 	import { PAGE_GAP } from '$lib/notes/pages';
 	import { BRUSHES, MARKER_ALPHA } from '$lib/notes/ink';
@@ -74,9 +75,11 @@
 	let canvasHeight = $state(0);
 
 	const canEdit = $derived(entry.role === 'edit');
+	/** Owner rights: this device holds the key, or the note is in our account. */
+	const owner = $derived(isOwner(entry));
 
 	/** Which floating panel is open. One at a time; a tap elsewhere closes it. */
-	let pop = $state<'' | 'people' | 'share' | 'more' | 'ink'>('');
+	let pop = $state<'' | 'people' | 'share' | 'more' | 'ink' | 'keep'>('');
 	/** The button that opened the panel, and where its bar sits: panels hang
 	 *  off it toward the middle of the screen, wherever the bar was put. */
 	let popFrom = $state<{ r: DOMRect; g: DOMRect; a: Anchor } | null>(null);
@@ -247,7 +250,7 @@
 		noteIndex.touch(entry.id);
 		// How the others' screens label us: the name given on joining, else
 		// role and a guess at the device.
-		const role = entry.ownerKey ? 'Owner' : canEdit ? 'Editor' : 'Observer';
+		const role = owner ? 'Owner' : canEdit ? 'Editor' : 'Observer';
 		const device = matchMedia('(pointer: coarse)').matches ? 'tablet' : 'computer';
 		const label = myName() || `${role} · ${device}`;
 		noteStore.connect(entry.id, { token: entry.token, label, owner: entry.ownerProof });
@@ -410,7 +413,7 @@
 	// watches, so it doesn't ink either.
 	const effectiveMode = $derived(canEdit && !focus ? mode : 'observe');
 	const zoomPct = $derived(Math.round(viewport.scale * 100));
-	const roleLabel = $derived(entry.ownerKey ? 'Owner' : canEdit ? 'Editor' : 'Observer');
+	const roleLabel = $derived(owner ? 'Owner' : canEdit ? 'Editor' : 'Observer');
 
 	const shareLink = $derived(`${location.origin}/?join=${encodeURIComponent(entry.name)}`);
 	let copied = $state(false);
@@ -436,7 +439,7 @@
 		rejoining = true;
 		rejoinError = '';
 		try {
-			const session: NoteSession & { ownerProof?: string } = entry.ownerKey
+			const session: NoteSession & { ownerProof?: string } = owner
 				? await ownerSession(entry.id, entry.ownerKey)
 				: await joinNote(entry.name, rejoinPasscode);
 			// A different passcode can mean a different role, and a different
@@ -454,8 +457,29 @@
 
 	// The creator's device can always get back in by itself.
 	$effect(() => {
-		if (noteStore.access === 'revoked' && entry.ownerKey) untrack(() => rejoin());
+		if (noteStore.access === 'revoked' && owner) untrack(() => rejoin());
 	});
+
+	// --- Keeping: an unsaved (or pre-account) note goes into the owner's account -----
+
+	let keepForm = $state({ name: '', password: '', busy: false, error: '' });
+
+	async function keepNote(signIn?: 'in' | 'create') {
+		keepForm.busy = true;
+		keepForm.error = '';
+		try {
+			if (signIn) {
+				await account.signIn(keepForm.name, keepForm.password, signIn === 'create');
+				keepForm.password = '';
+			}
+			noteIndex.save(await claimNote(entry.id, entry.ownerKey), { via: account.name });
+			pop = '';
+		} catch (err) {
+			keepForm.error = err instanceof Error ? err.message : 'Something went wrong.';
+		} finally {
+			keepForm.busy = false;
+		}
+	}
 
 	async function forgetDeleted() {
 		noteIndex.remove(entry.id);
@@ -779,9 +803,10 @@
 			<div class="ident">
 				<span class="name" title={entry.name}>{entry.name}</span>
 				<span class="kicker meta">
-					<span class="role" data-role={entry.ownerKey ? 'owner' : entry.role}>{roleLabel}</span>
+					<span class="role" data-role={owner ? 'owner' : entry.role}>{roleLabel}</span>
 					<span class="sep">/</span>
 					<span class="dot" data-status={noteStore.status}></span>{statusWord}
+					{#if entry.saved === false}<span class="sep">/</span><span class="unsaved" title="Not kept in an account: it ends when everyone leaves">unsaved</span>{/if}
 				</span>
 			</div>
 		{:else if id === 'people'}
@@ -810,7 +835,7 @@
 			<button class="ibtn" class:on={pop === 'share'} data-pop onclick={(e) => toggle('share', e)} title="Share" aria-label="Share">
 				<Icon name="link" />
 			</button>
-			{#if entry.ownerKey}
+			{#if owner}
 				<button
 					class="ibtn"
 					class:on={pullSent}
@@ -1040,7 +1065,7 @@
 					<span class="track"></span>
 					<span>Show their cursors &amp; views</span>
 				</label>
-				{#if entry.ownerKey}
+				{#if owner}
 					<button
 						class="btn lime wide"
 						disabled={noteStore.peers <= 1 || noteStore.access !== 'ok'}
@@ -1078,9 +1103,50 @@
 					</p>
 				</div>
 			</div>
+		{:else if pop === 'keep'}
+			<form
+				style={popStyle}
+				class="pop corner-pop keep"
+				data-pop
+				transition:scale={{ start: 0.96, duration: 160 }}
+				onsubmit={(e) => {
+					e.preventDefault();
+					void keepNote('in');
+				}}
+			>
+				<div class="pophead">
+					<span class="serif">Keep this note</span>
+				</div>
+				<p class="fine">Sign in, or make an account (just a name and a password), and this note is kept in it: it stays after everyone leaves, and you can open it from any device.</p>
+				<input class="input" bind:value={keepForm.name} placeholder="Name" autocomplete="username" autocapitalize="none" spellcheck="false" required />
+				<input class="input" type="password" bind:value={keepForm.password} placeholder="Password" autocomplete="current-password" required />
+				{#if keepForm.error}<p class="err-dark">{keepForm.error}</p>{/if}
+				<div class="row2">
+					<button class="btn primary" disabled={keepForm.busy}>Sign in &amp; keep</button>
+					<button type="button" class="btn" disabled={keepForm.busy || !keepForm.name || !keepForm.password} onclick={() => keepNote('create')}
+						>New account</button
+					>
+				</div>
+			</form>
 		{:else if pop === 'more'}
 			<div style={popStyle} class="pop corner-pop menu" data-pop transition:scale={{ start: 0.96, duration: 160 }}>
 				<span class="kicker sect">Document</span>
+				{#if owner && !entry.owned}
+					<button
+						class="item"
+						data-pop
+						onclick={(e) => (account.signedIn ? keepNote() : toggle('keep', e))}
+						title="Keep this note in your account: it stays after everyone leaves, and you can open and manage it from any device"
+					>
+						<Icon name="check" size={18} /><span>Keep in my account</span><span class="kicker" class:warnlit={entry.saved === false}
+							>{entry.saved === false ? 'unsaved' : 'this device only'}</span
+						>
+					</button>
+				{:else if entry.saved === false}
+					<div class="item static" title="Whoever created it didn't keep it in an account">
+						<Icon name="x" size={18} /><span>Not kept</span><span class="kicker warnlit">ends when all leave</span>
+					</div>
+				{/if}
 				{#if canEdit}
 					<button
 						class="item"
@@ -1161,7 +1227,7 @@
 						<Icon name="trash" size={18} /><span>Clear all ink</span><span class="kicker">undo-able</span>
 					</button>
 				{/if}
-				{#if entry.ownerKey}
+				{#if owner}
 					<span class="kicker sect">Owner</span>
 					<button
 						class="item"
@@ -1280,13 +1346,20 @@
 				<button class="mini" onclick={() => (pdfError = '')}>OK</button>
 			</div>
 		{/if}
-		{#if noteStore.access === 'gone'}
+		{#if noteStore.access === 'ended'}
+			<div class="notice warn" transition:fly={{ y: -12, duration: 220 }}>
+				<span class="kicker">Ended</span>
+				<span>This note wasn't kept in an account, so it ended when everyone had left. You're looking at this device's last copy.</span>
+				<button class="mini" disabled={pdfBusy !== ''} onclick={exportPdf}>Export PDF</button>
+				<button class="mini" onclick={forgetDeleted}>Forget it</button>
+			</div>
+		{:else if noteStore.access === 'gone'}
 			<div class="notice warn" transition:fly={{ y: -12, duration: 220 }}>
 				<span class="kicker">Deleted</span>
 				<span>The owner deleted this note. You're looking at this device's last copy.</span>
 				<button class="mini" onclick={forgetDeleted}>Forget it</button>
 			</div>
-		{:else if noteStore.access === 'revoked' && !entry.ownerKey}
+		{:else if noteStore.access === 'revoked' && !owner}
 			<form class="notice warn rejoin" onsubmit={rejoin} transition:fly={{ y: -12, duration: 220 }}>
 				<span class="kicker">Locked</span>
 				<span>The passcodes changed. Enter the new one to reconnect.</span>
@@ -1300,7 +1373,7 @@
 	</div>
 </div>
 
-{#if showSettings && entry.ownerKey}
+{#if showSettings && owner}
 	<NoteSettings {entry} onclose={() => (showSettings = false)} ondeleted={onleave} />
 {/if}
 
@@ -2303,6 +2376,33 @@
 	.choice button.on {
 		background: var(--lime);
 		color: var(--ink);
+	}
+	.item .kicker.warnlit {
+		color: var(--ink);
+		background: var(--amber);
+		padding: 0.15rem 0.45rem;
+		border-radius: 999px;
+	}
+	.unsaved {
+		color: var(--amber);
+	}
+	.keep .row2 {
+		display: flex;
+		gap: 0.5rem;
+	}
+	.keep .row2 .btn {
+		flex: 1;
+		padding: 0.65rem 0.8rem;
+		font-size: 0.88rem;
+	}
+	.keep .input {
+		padding: 0.55rem 0.75rem;
+		font-size: 0.95rem;
+	}
+	.err-dark {
+		margin: 0;
+		color: #c2381a;
+		font-size: 0.82rem;
 	}
 	.item .kicker.lit {
 		color: var(--ink);

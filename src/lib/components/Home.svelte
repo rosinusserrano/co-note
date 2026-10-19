@@ -1,9 +1,18 @@
 <script lang="ts">
-	import { untrack } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { fly } from 'svelte/transition';
 	import Icon from './Icon.svelte';
-	import { createNote, joinNote, normalizeName, ApiError, VIEW_ACCESS as ACCESS, type ViewAccess } from '$lib/notes/api';
-	import { noteIndex, myName, setMyName, NAME_MAX, type NoteEntry } from '$lib/notes/noteIndex.svelte';
+	import {
+		createNote,
+		joinNote,
+		forgetInAccount,
+		normalizeName,
+		ApiError,
+		VIEW_ACCESS as ACCESS,
+		type ViewAccess
+	} from '$lib/notes/api';
+	import { noteIndex, myName, setMyName, isOwner, NAME_MAX, type NoteEntry } from '$lib/notes/noteIndex.svelte';
+	import { account } from '$lib/notes/account.svelte';
 	import { destroyNoteData } from '$lib/notes/noteStore.svelte';
 
 	interface Props {
@@ -14,7 +23,37 @@
 	let { joinName = '', onopen }: Props = $props();
 
 	// A shared link lands on Join; a bare visit most likely wants a new note.
-	let tab = $state<'join' | 'create'>(untrack(() => (joinName ? 'join' : 'create')));
+	let tab = $state<'join' | 'create' | 'account'>(untrack(() => (joinName ? 'join' : 'create')));
+
+	// What the account holds joins this device's list (fresh tokens too).
+	onMount(() => void account.sync());
+
+	let accountForm = $state({ name: '', password: '', busy: false, error: '' });
+
+	async function signIn(create: boolean) {
+		accountForm.busy = true;
+		accountForm.error = '';
+		try {
+			await account.signIn(accountForm.name, accountForm.password, create);
+			accountForm.password = '';
+			if (!me) me = account.name; // how the others see you, unless already set
+			setMyName(me);
+			tab = 'create';
+		} catch (err) {
+			accountForm.error = errorText(err);
+		} finally {
+			accountForm.busy = false;
+		}
+	}
+
+	async function signOut() {
+		const held = noteIndex.notes.filter((n) => n.via === account.name).length;
+		if (held && !confirm(`Sign out? The ${held} note${held > 1 ? 's' : ''} from your account will be removed from this device (they stay in your account).`)) return;
+		await account.signOut();
+	}
+
+	/** Saved to the account when signed in: it then shows up on every device. */
+	const via = () => (account.signedIn ? { via: account.name } : {});
 
 	// Seeded once from the link; after that the field is the user's.
 	let joinForm = $state({ name: untrack(() => joinName), passcode: '', busy: false, error: '' });
@@ -38,7 +77,7 @@
 		try {
 			const session = await joinNote(joinForm.name, joinForm.passcode);
 			setMyName(me);
-			onopen(noteIndex.save(session).id);
+			onopen(noteIndex.save(session, via()).id);
 		} catch (err) {
 			joinForm.error = errorText(err);
 		} finally {
@@ -59,7 +98,7 @@
 				viewPasscode: viewAccess === 'passcode' ? viewPasscode : undefined
 			});
 			setMyName(me);
-			onopen(noteIndex.save(session).id);
+			onopen(noteIndex.save(session, via()).id);
 		} catch (err) {
 			createForm.error = errorText(err);
 		} finally {
@@ -68,10 +107,25 @@
 	}
 
 	async function forget(n: NoteEntry) {
-		const warning = n.ownerKey
-			? `Forget "${n.name}" on this device? You created it — this device is the only one that can change its passcodes or delete it, and that is lost too. The note itself stays on the server.`
-			: `Forget "${n.name}" on this device? You can join again with the passcode.`;
+		if (n.owned) {
+			alert(`"${n.name}" belongs to your account. To get rid of it, delete it in its settings (⋯ → Passcodes & access).`);
+			return;
+		}
+		const inAccount = !!n.via && n.via === account.name;
+		const warning = inAccount
+			? `Remove "${n.name}" from your account? You can join again with the passcode.`
+			: n.ownerKey
+				? `Forget "${n.name}" on this device? You created it — this device is the only one that can change its passcodes or delete it, and that is lost too.`
+				: `Forget "${n.name}" on this device? You can join again with the passcode.`;
 		if (!confirm(warning)) return;
+		if (inAccount) {
+			try {
+				await forgetInAccount(n.id);
+			} catch {
+				alert("Couldn't reach the server, so it stays in your account. Try again when you're online.");
+				return;
+			}
+		}
 		noteIndex.remove(n.id);
 		await destroyNoteData(n.id);
 	}
@@ -79,7 +133,7 @@
 	/** With notes on this device, they take the illustration's place. */
 	const returning = $derived(noteIndex.notes.length > 0);
 
-	const roleLabel = (n: NoteEntry) => (n.ownerKey ? 'Owner' : n.role === 'edit' ? 'Editor' : 'Observer');
+	const roleLabel = (n: NoteEntry) => (isOwner(n) ? 'Owner' : n.role === 'edit' ? 'Editor' : 'Observer');
 
 	function ago(t: number) {
 		const m = Math.round((Date.now() - t) / 60_000);
@@ -104,7 +158,13 @@
 <div class="home">
 	<header class="top" in:fly={{ y: -8, duration: 400 }}>
 		<span class="wordmark">co<em>note</em></span>
-		<span class="kicker tag">Shared ink · private zoom</span>
+		{#if account.signedIn}
+			<span class="acct kicker">
+				<button class="who" onclick={() => (tab = 'account')} title="Your account">{account.name}</button>
+			</span>
+		{:else}
+			<span class="kicker tag">Shared ink · private zoom</span>
+		{/if}
 	</header>
 
 	<section class="hero" class:returning>
@@ -132,7 +192,8 @@
 									<span class="no kicker">{String(i + 1).padStart(2, '0')}</span>
 									<span class="nm">{n.name}</span>
 									<span class="leader"></span>
-									<span class="role kicker" data-role={n.ownerKey ? 'owner' : n.role}>{roleLabel(n)}</span>
+									{#if n.saved === false}<span class="unsaved kicker" title="Not in anyone's account: it ends when everyone leaves">unsaved</span>{/if}
+									<span class="role kicker" data-role={isOwner(n) ? 'owner' : n.role}>{roleLabel(n)}</span>
 									<span class="when kicker">{ago(n.openedAt)}</span>
 								</button>
 								<button class="forget" aria-label={`Forget ${n.name}`} title="Forget on this device" onclick={() => forget(n)}>
@@ -183,6 +244,9 @@
 				<button role="tab" aria-selected={tab === 'join'} class:on={tab === 'join'} onclick={() => (tab = 'join')}>
 					<span class="kicker">02</span> Join
 				</button>
+				<button role="tab" aria-selected={tab === 'account'} class:on={tab === 'account'} onclick={() => (tab = 'account')}>
+					<span class="kicker">03</span> {account.signedIn ? 'Account' : 'Sign in'}
+				</button>
 			</div>
 
 			{#snippet yourName()}
@@ -192,7 +256,51 @@
 				</label>
 			{/snippet}
 
-			{#if tab === 'join'}
+			{#if tab === 'account'}
+				{#if account.signedIn}
+					<div class="card">
+						<h2>Signed in as <em>{account.name}</em></h2>
+						<p class="note">
+							Notes you create are kept in your account, and every note you join stays open to you on any device you sign in
+							on, until its owner changes that passcode.
+						</p>
+						<button class="btn" onclick={signOut}>Sign out</button>
+					</div>
+				{:else}
+					<form
+						class="card"
+						onsubmit={(e) => {
+							e.preventDefault();
+							void signIn(false);
+						}}
+					>
+						<h2>Your account <em class="opt">optional</em></h2>
+						<p class="note">
+							Without one, a note you create isn't kept: it ends when the last person leaves. With one, your notes are kept,
+							and the notes you join stay on your list everywhere you sign in.
+						</p>
+						<label class="field">
+							<span class="kicker">Name</span>
+							<input class="input" bind:value={accountForm.name} autocomplete="username" autocapitalize="none" spellcheck="false" required />
+						</label>
+						<label class="field">
+							<span class="kicker">Password</span>
+							<input class="input" type="password" bind:value={accountForm.password} autocomplete="current-password" required />
+							<small>New account: at least 8 characters.</small>
+						</label>
+						{#if accountForm.error}<p class="error-text">{accountForm.error}</p>{/if}
+						<div class="pair">
+							<button class="btn primary go" disabled={accountForm.busy}>Sign in<span class="arrow">→</span></button>
+							<button
+								type="button"
+								class="btn"
+								disabled={accountForm.busy || !accountForm.name || !accountForm.password}
+								onclick={() => signIn(true)}>Create account</button
+							>
+						</div>
+					</form>
+				{/if}
+			{:else if tab === 'join'}
 				<form class="card" onsubmit={join}>
 					<h2>Join a note</h2>
 					<label class="field">
@@ -243,6 +351,12 @@
 					{/if}
 					{@render yourName()}
 					{#if createForm.error}<p class="error-text">{createForm.error}</p>{/if}
+					{#if !account.signedIn}
+						<p class="note warn">
+							Not signed in: this note won't be kept. It ends a couple of minutes after the last person leaves.
+							<button type="button" class="link" onclick={() => (tab = 'account')}>Sign in to keep it</button>
+						</p>
+					{/if}
 					<button class="btn primary go" disabled={createForm.busy}>
 						{createForm.busy ? 'Creating…' : 'Create note'}<span class="arrow">→</span>
 					</button>
@@ -499,6 +613,58 @@
 	.mono {
 		font-family: var(--f-mono);
 		font-weight: 500;
+	}
+	.note {
+		margin: 0;
+		color: var(--graphite);
+		font-size: 0.88rem;
+		line-height: 1.45;
+	}
+	.note.warn {
+		padding: 0.6rem 0.8rem;
+		border-radius: 12px;
+		background: rgb(242 179 61 / 0.16);
+		color: var(--ink-3);
+	}
+	.link {
+		padding: 0;
+		border: none;
+		background: none;
+		color: var(--ink);
+		font: inherit;
+		font-weight: 600;
+		text-decoration: underline;
+		text-decoration-color: var(--lime-deep);
+		text-decoration-thickness: 2px;
+		cursor: pointer;
+	}
+	.pair {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.6rem;
+		align-items: center;
+	}
+	.pair .go {
+		flex: 1;
+	}
+	.pair .btn:not(.go) {
+		margin-top: 0.3rem;
+		padding: 0.9rem 1.2rem;
+	}
+	.acct .who {
+		padding: 0.35rem 0.7rem;
+		border: none;
+		border-radius: 999px;
+		background: var(--ink);
+		color: var(--lime);
+		font: inherit;
+		letter-spacing: inherit;
+		text-transform: none;
+		cursor: pointer;
+	}
+	.unsaved {
+		flex: none;
+		color: #9a5b12;
 	}
 
 	/* --- My notes: a table of contents ------------------------------------------ */

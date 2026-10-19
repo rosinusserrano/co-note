@@ -46,6 +46,13 @@ const WS_OPEN = 1;
 // WebSocket close codes the client acts on (4000–4999 is the app range).
 const CLOSE_UNAUTHORIZED = 4401; // bad/revoked token: ask for the passcode again
 const CLOSE_GONE = 4404; // note deleted
+const CLOSE_ENDED = 4410; // an unsaved note ended: nobody was left on it
+
+// An unsaved note (created without an account) is deleted once nobody has
+// been connected for this long. Not instantly: a reload or a flaky network
+// mustn't end it, and a restart of this server gives everyone this long to
+// come back.
+const ENDED_GRACE_MS = Number(process.env.CONOTE_ENDED_GRACE_MS) || 2 * 60_000;
 
 // How long after the last edit a room's doc is written to disk.
 const SAVE_DELAY_MS = 1000;
@@ -213,6 +220,27 @@ function onSignalConnection(ws, id, role) {
 	ws.on('error', cleanup);
 }
 
+// --- Unsaved notes end ------------------------------------------------------
+
+/** note id → when it was last known to have someone on it (or was created). */
+const lastSeen = new Map();
+const startedAt = Date.now();
+
+setInterval(() => {
+	const now = Date.now();
+	for (const id of registry.ephemeralIds()) {
+		if ((rooms.get(id)?.conns.size ?? 0) > 0) continue;
+		if (now - (lastSeen.get(id) ?? startedAt) < ENDED_GRACE_MS) continue;
+		const room = rooms.get(id);
+		if (room) clearTimeout(room.saveTimer);
+		if (registry.endNote(id)) {
+			lastSeen.delete(id);
+			closeConnections(id, ['edit', 'view'], CLOSE_ENDED);
+			console.log(`[sync] unsaved note ${id} ended`);
+		}
+	}
+}, Math.min(15_000, ENDED_GRACE_MS / 4)).unref();
+
 // --- HTTP API ---------------------------------------------------------------
 
 /** Per-IP attempt budgets. Passcodes are short and human-picked, so guessing
@@ -226,6 +254,12 @@ const limits = {
 	joinName: { max: 20, windowMs: 60 * 60_000 },
 	create: { max: 10, windowMs: 60 * 60_000 },
 	owner: { max: 10, windowMs: 10 * 60_000 },
+	login: { max: 10, windowMs: 10 * 60_000 },
+	// Per account name, like joinName.
+	loginName: { max: 20, windowMs: 60 * 60_000 },
+	register: { max: 5, windowMs: 60 * 60_000 },
+	// Signed-in calls (listing, forgetting): plenty, just not unbounded.
+	account: { max: 300, windowMs: 10 * 60_000 },
 	upload: { max: 30, windowMs: 60 * 60_000 }
 };
 /** @type {Map<string, { count: number, resetAt: number }>} */
@@ -338,19 +372,36 @@ async function handleFile(req, res, match, reply, ip) {
 	reply(405, { error: 'Method not allowed.' });
 }
 
-/** route → [rate-limit bucket, handler]. A request that fails with 403 counts
- *  against the bucket; successful ones don't (except create, which always does). */
+/** Signed-in only: refuses without a valid account session. */
+const signedIn = (fn) => (body, account) => {
+	if (!account) throw new registry.HttpError(401, 'Please sign in again.');
+	return fn(account, body);
+};
+
+/** route → [rate-limit bucket, handler(body, account)]. `account` is the
+ *  signed-in account (from `Authorization: Bearer <account session>`), or
+ *  null. A request that fails with 403 counts against the bucket; successful
+ *  ones don't (except create and register, which always do). */
 const routes = {
-	'/api/notes': ['create', (body) => registry.createNote(body)],
-	'/api/join': ['join', (body) => registry.join(body)],
-	'/api/owner/session': ['owner', (body) => registry.ownerSession(body)],
-	'/api/owner/settings': ['owner', async (body) => {
-		const { revoked, session } = await registry.updateSettings(body);
+	'/api/notes': ['create', async (body, account) => {
+		const session = await registry.createNote(body, account);
+		lastSeen.set(session.id, Date.now()); // its grace starts now, before anyone connects
+		return session;
+	}],
+	'/api/join': ['join', (body, account) => registry.join(body, account)],
+	'/api/account/register': ['register', (body) => registry.register(body)],
+	'/api/account/login': ['login', (body) => registry.login(body)],
+	'/api/account/notes': ['account', signedIn((account) => registry.accountNotes(account))],
+	'/api/account/forget': ['account', signedIn((account, body) => registry.forget(account, body))],
+	'/api/account/claim': ['owner', signedIn((account, body) => registry.claim(account, body))],
+	'/api/owner/session': ['owner', (body, account) => registry.ownerSession(body, account)],
+	'/api/owner/settings': ['owner', async (body, account) => {
+		const { revoked, session } = await registry.updateSettings(body, account);
 		closeConnections(session.id, revoked, CLOSE_UNAUTHORIZED);
 		return session;
 	}],
-	'/api/owner/delete': ['owner', async (body) => {
-		const id = await registry.deleteNote(body);
+	'/api/owner/delete': ['owner', async (body, account) => {
+		const id = await registry.deleteNote(body, account);
 		closeConnections(id, ['edit', 'view'], CLOSE_GONE);
 		const room = rooms.get(id);
 		if (room) clearTimeout(room.saveTimer);
@@ -389,20 +440,23 @@ async function handleHttp(req, res) {
 	const ip = clientIp(req);
 	const busy = (kind, key) => overLimit(kind, key) && reply(429, { error: 'Too many attempts. Try again later.' });
 	if (busy(bucket, ip)) return;
-	let name = null; // join only: the per-name budget's key
+	let name = null; // join / login: the per-name budget's key
+	const nameBucket = bucket === 'join' ? 'joinName' : bucket === 'login' ? 'loginName' : null;
 	try {
 		const body = await readJson(req);
-		if (bucket === 'join') {
-			name = registry.normalizeName(body.name);
-			if (busy('joinName', name)) return;
+		if (nameBucket) {
+			name = bucket === 'join' ? registry.normalizeName(body.name) : String(body.name ?? '').trim().toLowerCase();
+			if (busy(nameBucket, name)) return;
 		}
-		if (bucket === 'create') countAttempt(bucket, ip);
-		reply(200, await handler(body));
+		if (bucket === 'create' || bucket === 'register' || bucket === 'account') countAttempt(bucket, ip);
+		const auth = String(req.headers.authorization ?? '');
+		const account = auth.startsWith('Bearer ') ? registry.verifyAccount(auth.slice(7)) : null;
+		reply(200, await handler(body, account));
 	} catch (e) {
 		if (e instanceof registry.HttpError) {
 			if (e.status === 403) {
 				countAttempt(bucket, ip);
-				if (name !== null) countAttempt('joinName', name);
+				if (nameBucket) countAttempt(nameBucket, name);
 			}
 			reply(e.status, { error: e.message });
 		} else {
@@ -469,7 +523,8 @@ server.on('upgrade', (req, socket, head) => {
 		// Accept, then close with a code: a refused upgrade reaches the browser as
 		// a bare 1006, which a client can't tell apart from a network blip.
 		if (!access || access.note.id !== id) {
-			ws.close(registry.noteExists(id) ? CLOSE_UNAUTHORIZED : CLOSE_GONE, 'no access');
+			const code = registry.noteExists(id) ? CLOSE_UNAUTHORIZED : registry.wasEnded(id) ? CLOSE_ENDED : CLOSE_GONE;
+			ws.close(code, 'no access');
 			return;
 		}
 		if (signal) onSignalConnection(ws, id, access.role);
@@ -482,6 +537,7 @@ server.on('upgrade', (req, socket, head) => {
 
 wss.on('connection', (ws, id, role) => {
 	ws.binaryType = 'arraybuffer';
+	lastSeen.set(id, Date.now());
 	ws.role = role;
 	const room = getRoom(id);
 	room.conns.set(ws, new Set());
@@ -548,6 +604,7 @@ wss.on('connection', (ws, id, role) => {
 			awarenessProtocol.removeAwarenessStates(room.awareness, [...owned], null);
 		}
 		if (room.conns.size === 0) {
+			lastSeen.set(id, Date.now());
 			if (room.saveTimer) saveRoom(id, room);
 			room.doc.destroy();
 			rooms.delete(id);

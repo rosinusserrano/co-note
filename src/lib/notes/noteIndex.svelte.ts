@@ -23,8 +23,17 @@ export interface NoteEntry {
 	/** With the owner key: marks this device's connection as the owner's, which
 	 *  lets it pull the others' views. Fetched with the key if missing. */
 	ownerProof?: string;
+	/** Owned by the signed-in account: owner rights without the key. */
+	owned?: boolean;
+	/** False: nobody's account keeps it, so it ends when everyone leaves. */
+	saved?: boolean;
+	/** The account this entry came from or was saved to: signing out forgets it. */
+	via?: string;
 	openedAt: number;
 }
+
+/** The owner's rights: the key on this device, or the note is in our account. */
+export const isOwner = (n: NoteEntry) => !!n.ownerKey || !!n.owned;
 
 class NoteIndex {
 	notes = $state<NoteEntry[]>([]);
@@ -51,17 +60,24 @@ class NoteIndex {
 
 	/** Record a session from the server — a create, a join, or a renewed token.
 	 *  Keeps an existing owner key / proof unless a new one is given. */
-	save(session: NoteSession & { ownerKey?: string; ownerProof?: string }) {
+	save(
+		session: NoteSession & { ownerKey?: string; ownerProof?: string },
+		opts: { via?: string; openedAt?: number } = {}
+	) {
 		const prev = this.get(session.id);
 		const entry: NoteEntry = {
 			id: session.id,
 			name: session.name,
 			role: session.role,
 			viewAccess: session.viewAccess,
-			token: session.token,
+			// A locked entry from the account list has none: keep what we have.
+			token: session.token || prev?.token || '',
 			ownerKey: session.ownerKey ?? prev?.ownerKey,
 			ownerProof: session.ownerProof ?? prev?.ownerProof,
-			openedAt: Date.now()
+			owned: session.owned ?? prev?.owned,
+			saved: session.saved ?? prev?.saved,
+			via: opts.via ?? prev?.via,
+			openedAt: opts.openedAt ?? Date.now()
 		};
 		this.notes = [...this.notes.filter((n) => n.id !== entry.id), entry];
 		this.#persist();

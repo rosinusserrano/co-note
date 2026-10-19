@@ -99,6 +99,17 @@ chosen device.
   the turn (never stopping). The
   path's math (endpoints exact, edges monotonic, shape kept) checked
   separately.
+  Accounts round (21 checks, grace cut to 6 s): signed out, the New note
+  form warns and the note shows *unsaved*; a signed-in editor joining it
+  doesn't save it — it survives inside the grace time and is gone after
+  (join fails, the creator's device shows *ended* with its last copy); a note
+  created signed in survives everyone leaving; another device signing in to
+  the joining account lists it and opens it without a passcode; the owner's
+  second device lists it as Owner and changes passcodes without the key; that
+  locks the other account's grant until the new passcode; *Keep in my
+  account* from inside an anonymous note (new account) keeps it past the
+  grace time; signing out removes the account's notes from the device; wrong
+  password, weak password, taken name refused.
   Bars round (28 + 10 checks): defaults leave the bottom-right quarter
   empty; the title tucks into a quarter circle at the corner with the live
   dot, the tools into a left-edge tab, both survive a reload and come back on
@@ -300,7 +311,41 @@ must be preserved:
   owner devices from before it fetch one with the key on open. The relay socket
   takes it as `&owner=` next to the token (see Presence → pulls).
 - `noteIndex` (localStorage `conote:notes`) is this device's keyring: tokens, not
-  passcodes. It is not synced; another device joins with the passcode.
+  passcodes. Without an account it is not synced; another device joins with
+  the passcode.
+
+### Accounts and what is kept (`registry.js`, `account.svelte.ts`)
+
+- **Optional, name + password only** (`accounts.json`: scrypt hash, and per
+  note the *grant*: role + that role's epoch). Session token
+  `a.<key>.<epoch>.<sig>`, stateless like note tokens, sent as
+  `Authorization: Bearer` on every API call (`setAccountSession` in `api.ts`);
+  routes get `(body, account)`. Register/login have their own per-IP and
+  per-name budgets; wrong name and wrong password answer alike.
+- **Accounts decide what is kept.** `note.keep`: `'account'` (created while
+  signed in, or claimed — kept until deleted), `'none'` (created signed out:
+  **ephemeral**), `'legacy'` (from before accounts: kept, until its owner
+  claims it). An ephemeral note is deleted by the sweep in `sync-server.js`
+  once its relay room has been empty for `ENDED_GRACE_MS` (2 min;
+  `CONOTE_ENDED_GRACE_MS` for tests) — whoever else joined, signed in or not.
+  The grace covers reloads, network blips and server restarts (`lastSeen`
+  starts at create / server start). Ended ids are remembered for a month, so
+  a returning device gets close code **4410** → `access = 'ended'` ("ended
+  when everyone left", last local copy, Export / Forget) instead of 4404.
+- **Grants follow the account.** Create/join while signed in records the
+  grant; `/api/account/notes` returns every grant with a fresh token (owner
+  sessions with `owned: true` + proof for the account's own notes), so any
+  device that signs in has them, no passcodes. A grant whose role's epoch
+  moved on (passcode changed) comes back `locked`, without a token: opening it
+  gets 4401 and the usual rejoin prompt, and rejoining signed in renews it.
+  The owner's account is never locked out.
+- **Owner rights** = the owner key on this device *or* `note.account` = the
+  signed-in account (`asOwner`); `isOwner(entry)` on the client. *Keep in my
+  account* (⋯ menu, owner only, signs in / registers inline) is
+  `/api/account/claim`: ephemeral or legacy → `'account'`.
+- **Signing out forgets the account's notes on the device** (entries with
+  `via` = that account, and their local data): a borrowed laptop keeps
+  nothing. Entries joined signed out stay.
 - One note = one Yjs doc = one server room (the note id) = one IndexedDB
   database (`roomFor(id)`). Ids are random, so a deleted note's name can be
   reused without a stale local copy merging into the new note.

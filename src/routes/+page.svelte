@@ -5,12 +5,14 @@
 	import Home from '$lib/components/Home.svelte';
 	import NoteView from '$lib/components/NoteView.svelte';
 	import { noteIndex } from '$lib/notes/noteIndex.svelte';
+	import { account } from '$lib/notes/account.svelte';
 
 	// `?note=<id>` opens one of this device's notes; anything else is the start
 	// screen. `?join=<name>` (a shared link) prefills the join form.
 	let ready = $state(false);
 	onMount(() => {
 		noteIndex.load();
+		account.load();
 		ready = true;
 	});
 

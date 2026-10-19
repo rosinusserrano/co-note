@@ -19,6 +19,12 @@ export interface NoteSession {
 	role: NoteRole;
 	viewAccess: ViewAccess;
 	token: string;
+	/** Kept after everyone leaves (it belongs to an account). False: it ends then. */
+	saved?: boolean;
+	/** The signed-in account owns it: owner rights without the owner key. */
+	owned?: boolean;
+	/** From the account's list: the passcode changed since; no token. */
+	locked?: boolean;
 }
 
 /** What the owner key gets: an editor session plus the owner proof (see
@@ -35,18 +41,29 @@ function apiBase(): string {
 	return location.port ? `${location.protocol}//${location.hostname}:5182/api` : '/api';
 }
 
+/** The signed-in account's session, sent with every call (see account.svelte.ts). */
+let accountSession = '';
+export const setAccountSession = (s: string) => (accountSession = s);
+
+/** The server said the account session is no longer good. */
+export class SignedOutError extends Error {}
+
 async function post<T>(path: string, body: object): Promise<T> {
 	let res: Response;
 	try {
 		res = await fetch(apiBase() + path, {
 			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
+			headers: {
+				'Content-Type': 'application/json',
+				...(accountSession ? { Authorization: `Bearer ${accountSession}` } : {})
+			},
 			body: JSON.stringify(body)
 		});
 	} catch {
 		throw new ApiError("Can't reach the server. Check your connection.");
 	}
 	const data = await res.json().catch(() => ({}));
+	if (res.status === 401) throw new SignedOutError(data.error ?? 'Please sign in again.');
 	if (!res.ok) throw new ApiError(data.error ?? `Server error (${res.status}).`);
 	return data as T;
 }
@@ -64,21 +81,42 @@ export const createNote = (body: {
 export const joinNote = (name: string, passcode: string) =>
 	post<NoteSession>('/join', { name, passcode });
 
-export const ownerSession = (id: string, ownerKey: string) =>
+/** With the owner key, or (no key) as the account that owns the note. */
+export const ownerSession = (id: string, ownerKey?: string) =>
 	post<OwnerSession>('/owner/session', { id, ownerKey });
 
 /** Omitted fields stay as they are. Returns a fresh session for the owner,
  *  since changing the editor passcode revokes their old token too. */
 export const updateSettings = (body: {
 	id: string;
-	ownerKey: string;
+	ownerKey?: string;
 	editPasscode?: string;
 	viewAccess?: ViewAccess;
 	viewPasscode?: string;
 }) => post<OwnerSession>('/owner/settings', body);
 
-export const deleteNote = (id: string, ownerKey: string) =>
+export const deleteNote = (id: string, ownerKey?: string) =>
 	post<{ ok: true }>('/owner/delete', { id, ownerKey });
+
+// --- Accounts ----------------------------------------------------------------------
+
+export interface AccountSession {
+	name: string;
+	session: string;
+}
+
+export const register = (name: string, password: string) =>
+	post<AccountSession>('/account/register', { name, password });
+
+export const login = (name: string, password: string) => post<AccountSession>('/account/login', { name, password });
+
+/** Every note the account holds, with fresh tokens (`at`: when it was granted). */
+export const accountNotes = () => post<{ notes: (NoteSession & { ownerProof?: string; at?: number })[] }>('/account/notes', {});
+
+export const forgetInAccount = (id: string) => post<{ ok: true }>('/account/forget', { id });
+
+/** Keep a note this device owns (by key) in the account. */
+export const claimNote = (id: string, ownerKey?: string) => post<OwnerSession>('/account/claim', { id, ownerKey });
 
 // --- Files (imported PDFs) -----------------------------------------------------
 // The note token goes in the Authorization header; the server checks it like

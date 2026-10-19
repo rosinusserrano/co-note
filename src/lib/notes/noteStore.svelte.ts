@@ -36,8 +36,9 @@ import { uploadFile, downloadFile } from './api';
 
 export type SyncStatus = 'offline' | 'connecting' | 'connected' | 'disconnected';
 /** 'revoked': the server no longer accepts our token (passcode changed).
- *  'gone': the note was deleted. Either way we stop reconnecting. */
-export type Access = 'ok' | 'revoked' | 'gone';
+ *  'gone': the note was deleted. 'ended': it wasn't kept in an account and
+ *  everyone had left. Either way we stop reconnecting. */
+export type Access = 'ok' | 'revoked' | 'gone' | 'ended';
 
 /** Another session on this note, as it last told us. World coordinates. */
 export interface Presence {
@@ -118,6 +119,7 @@ const PRESENCE_COLORS = ['#db2777', '#0284c7', '#65a30d', '#d97706', '#9333ea', 
 // Close codes from server/sync-server.js.
 const CLOSE_UNAUTHORIZED = 4401;
 const CLOSE_GONE = 4404;
+const CLOSE_ENDED = 4410;
 
 /** Where the note server's WebSockets live, overridable with `?sync=`.
  *  Served from a default port (production: Caddy terminates TLS and proxies
@@ -351,9 +353,9 @@ class NoteStore {
 			// for that very token) can arrive late — it says nothing about the new one.
 			const sentToken = new URL((e?.target as WebSocket | null)?.url ?? 'x:').searchParams.get('token');
 			if (sentToken !== null && sentToken !== ws.params.token) return;
-			if (code === CLOSE_UNAUTHORIZED || code === CLOSE_GONE) {
+			if (code === CLOSE_UNAUTHORIZED || code === CLOSE_GONE || code === CLOSE_ENDED) {
 				// Retrying can't help; the local copy stays readable.
-				this.access = code === CLOSE_GONE ? 'gone' : 'revoked';
+				this.access = code === CLOSE_GONE ? 'gone' : code === CLOSE_ENDED ? 'ended' : 'revoked';
 				ws.disconnect();
 				this.#p2p?.destroy();
 				this.#p2p = null;
