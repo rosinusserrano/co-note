@@ -32,7 +32,13 @@
 		columns: '<rect x="2.5" y="5" width="8" height="14" rx="1.5"/><rect x="13.5" y="5" width="8" height="14" rx="1.5"/>',
 		users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
 		gather: '<circle cx="12" cy="12" r="2.5"/><path d="M3 3l5 5M21 3l-5 5M3 21l5-5M21 21l-5-5"/><path d="M3 7.5V3h4.5M21 7.5V3h-4.5M3 16.5V21h4.5M21 16.5V21h-4.5"/>',
-		erase: '<path d="M4 20h16"/><path d="m6 16 6-12 6 12"/><path d="M8 12h8"/>'
+		erase: '<path d="M4 20h16"/><path d="m6 16 6-12 6 12"/><path d="M8 12h8"/>',
+		chevronLeft: '<path d="m15 18-6-6 6-6"/>',
+		chevronRight: '<path d="m9 18 6-6-6-6"/>',
+		chevronUp: '<path d="m18 15-6-6-6 6"/>',
+		chevronDown: '<path d="m6 9 6 6 6-6"/>',
+		zoom: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M11 8v6M8 11h6"/>',
+		layout: '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>'
 	} as const;
 	export type IconName = keyof typeof ICONS;
 </script>

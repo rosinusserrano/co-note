@@ -11,6 +11,17 @@
 	import { PAGE_GAP } from '$lib/notes/pages';
 	import { BRUSHES, MARKER_ALPHA } from '$lib/notes/ink';
 	import type { Brush } from '$lib/notes/model';
+	import {
+		Bars,
+		ANCHORS,
+		ANCHOR_NAMES,
+		BAR_NAMES,
+		isColumn,
+		isCorner,
+		fits,
+		type Anchor,
+		type BarId
+	} from './bars.svelte';
 
 	interface Props {
 		entry: NoteEntry;
@@ -66,7 +77,17 @@
 
 	/** Which floating panel is open. One at a time; a tap elsewhere closes it. */
 	let pop = $state<'' | 'people' | 'share' | 'more' | 'ink'>('');
-	const toggle = (p: typeof pop) => (pop = pop === p ? '' : p);
+	/** The button that opened the panel, and where its bar sits: panels hang
+	 *  off it toward the middle of the screen, wherever the bar was put. */
+	let popFrom = $state<{ r: DOMRect; g: DOMRect; a: Anchor } | null>(null);
+	function toggle(p: typeof pop, e?: MouseEvent) {
+		const el = e?.currentTarget as HTMLElement | undefined;
+		const group = el?.closest<HTMLElement>('[data-anchor]');
+		if (el && group) {
+			popFrom = { r: el.getBoundingClientRect(), g: group.getBoundingClientRect(), a: group.dataset.anchor as Anchor };
+		}
+		pop = pop === p ? '' : p;
+	}
 	let showSettings = $state(false);
 	let showOthers = $state(true);
 
@@ -471,7 +492,8 @@
 		}
 		if (mod || e.altKey) return;
 		if (e.key === 'Escape') {
-			if (pop) pop = '';
+			if (customizing) setCustomizing(false);
+			else if (pop) pop = '';
 			else if (focus) setFocus(false);
 			return;
 		}
@@ -496,6 +518,218 @@
 
 	const showRail = $derived(canEdit && effectiveMode === 'draw');
 
+	// --- Bars: where each sits, merged or tucked away, per device --------------
+
+	const bars = new Bars();
+	const narrowQuery = matchMedia('(max-width: 600px)');
+	bars.profile = narrowQuery.matches ? 'narrow' : 'wide';
+	onMount(() => {
+		const onChange = () => (bars.profile = narrowQuery.matches ? 'narrow' : 'wide');
+		narrowQuery.addEventListener('change', onChange);
+		return () => narrowQuery.removeEventListener('change', onChange);
+	});
+
+	/** The bars this device shows at an anchor (observers have no tools). */
+	const shown = (a: Anchor) => bars.at(a).filter((id) => id !== 'tools' || canEdit);
+	const present = (a: Anchor) => shown(a).length > 0 && !bars.isHidden(a);
+
+	/** Which way each anchor's tuck button points: where the capsule goes. */
+	const TUCK: Record<Anchor, IconName> = {
+		'top-start': 'chevronLeft',
+		'top-center': 'chevronUp',
+		'top-end': 'chevronRight',
+		left: 'chevronLeft',
+		right: 'chevronRight',
+		'bottom-start': 'chevronLeft',
+		'bottom-center': 'chevronDown',
+		'bottom-end': 'chevronRight'
+	};
+	function tuckFly(a: Anchor) {
+		const x = a.endsWith('-start') || a === 'left' ? -40 : a.endsWith('-end') || a === 'right' ? 40 : 0;
+		const y = a.startsWith('top') ? -24 : a.startsWith('bottom') ? 24 : 0;
+		return { x, y, duration: 240 };
+	}
+	/** What a tucked-away capsule shows: the live dot for the title, else its first bar. */
+	function stubIcon(a: Anchor): IconName | null {
+		const first = shown(a)[0];
+		if (shown(a).includes('title')) return null;
+		if (first === 'tools') return TOOLS.find((t) => t.id === tool)?.icon ?? 'pen';
+		return first === 'view' ? 'zoom' : 'users';
+	}
+	const groupLabel = (a: Anchor) => shown(a).map((id) => BAR_NAMES[id]).join(' + ');
+
+	// Top and bottom rows are placed by hand rather than by flexbox: a centre
+	// capsule stays truly centred, a row too full for one line puts the centre
+	// on a line of its own (inward), and the title gives way first.
+	const GAP = 12;
+	const TITLE_MIN = 48;
+	let rowWidth = $state(0);
+	let groupW = $state<Partial<Record<Anchor, number>>>({});
+	let groupH = $state<Partial<Record<Anchor, number>>>({});
+	let segW = $state<Partial<Record<BarId, number>>>({});
+
+	const rows = $derived.by(() => {
+		const places: Partial<Record<Anchor, { x: number; y: number }>> = {};
+		const W = rowWidth;
+		const titleAt = bars.anchorOf('title');
+		/** Room for the title's whole capsule. */
+		let titleRoom = 0;
+		const height = { top: 0, bottom: 0 };
+		const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+		for (const edge of ['top', 'bottom'] as const) {
+			const [s, c, e] = (['start', 'center', 'end'] as const).map((p) => `${edge}-${p}` as Anchor);
+			const w = (a: Anchor) => (present(a) ? (groupW[a] ?? 0) : 0);
+			const h = (a: Anchor) => (present(a) ? (groupH[a] ?? 0) : 0);
+			// The narrowest each can get: the title shrinks down to TITLE_MIN.
+			const min = (a: Anchor) => (a === titleAt && present(a) ? w(a) - (segW.title ?? 0) + TITLE_MIN : w(a));
+			const beside = (x: number) => (x ? x + GAP : 0);
+			const [S, C, E] = [w(s), w(c), w(e)];
+			const [sm, cm, em] = [min(s), min(c), min(e)];
+			if (cm > 0 && beside(sm) + cm + beside(em) > W) {
+				const sides = Math.max(h(s), h(e));
+				const mid = h(c);
+				const sidesY = edge === 'top' ? 0 : mid + GAP;
+				const midY = edge === 'top' ? beside(sides) : 0;
+				places[s] = { x: 0, y: sidesY };
+				places[e] = { x: W - E, y: sidesY };
+				places[c] = { x: Math.max(0, (W - C) / 2), y: midY };
+				height[edge] = Math.max(sidesY + sides, midY + mid);
+				if (titleAt === s) titleRoom = W - beside(em);
+				else if (titleAt === e) titleRoom = W - beside(sm);
+				else if (titleAt === c) titleRoom = W;
+			} else {
+				places[s] = { x: 0, y: 0 };
+				places[e] = { x: W - E, y: 0 };
+				places[c] = { x: clamp((W - C) / 2, beside(S), W - C - beside(E)), y: 0 };
+				height[edge] = Math.max(h(s), h(c), h(e));
+				// Beside a centre capsule the title keeps it centred if it can.
+				const side = (other: number) => (cm ? clamp((W - cm) / 2 - GAP, min(titleAt), W - cm - GAP - beside(other)) : W - beside(other));
+				if (titleAt === s) titleRoom = side(em);
+				else if (titleAt === e) titleRoom = side(sm);
+				else if (titleAt === c) titleRoom = Math.max(cm, W - 2 * Math.max(beside(sm), beside(em)));
+			}
+		}
+		const rest = (groupW[titleAt] ?? 0) - (segW.title ?? 0);
+		return { places, height, titleMax: W > 0 ? Math.max(TITLE_MIN, titleRoom - rest) : 0 };
+	});
+
+	/** Where the open panel goes, from the button that opened it. */
+	const popStyle = $derived.by(() => {
+		if (!popFrom) return '';
+		// Clear of the whole capsule on the side facing the screen, level with the button.
+		const { r, g, a } = popFrom;
+		const [W, H] = [canvasWidth, canvasHeight];
+		const css: string[] = [];
+		let v: string;
+		let o: string;
+		if (isColumn(a)) {
+			css.push(a === 'left' ? `left: ${g.right + 10}px` : `right: ${W - g.left + 10}px`);
+			o = a === 'left' ? 'left' : 'right';
+			if (r.top + r.height / 2 < H / 2) {
+				css.push(`top: ${r.top}px`, `max-height: calc(100% - ${r.top}px - var(--bottom))`);
+				v = 'top';
+			} else {
+				css.push(`bottom: ${H - r.bottom}px`, `max-height: calc(${r.bottom}px - var(--top))`);
+				v = 'bottom';
+			}
+		} else {
+			if (a.startsWith('top')) {
+				css.push(`top: ${g.bottom + 10}px`, `max-height: calc(100% - ${g.bottom + 10}px - var(--bottom))`);
+				v = 'top';
+			} else {
+				css.push(`bottom: ${H - g.top + 10}px`, `max-height: calc(${g.top - 10}px - var(--top))`);
+				v = 'bottom';
+			}
+			// Aligned with the button's outer side, kept on screen.
+			if (r.left + r.width / 2 > W / 2) {
+				css.push(`right: clamp(var(--right), ${W - r.right}px, calc(100% - var(--pw) - var(--left)))`);
+				o = 'right';
+			} else {
+				css.push(`left: clamp(var(--left), ${r.left}px, calc(100% - var(--pw) - var(--right)))`);
+				o = 'left';
+			}
+		}
+		css.push(`transform-origin: ${v} ${o}`);
+		return css.join('; ');
+	});
+
+	// --- Customising: drag a bar to an anchor, or into another capsule ---------
+
+	let customizing = $state(false);
+	type Drag = {
+		id: BarId;
+		x: number;
+		y: number;
+		to: Anchor | null;
+		/** The bar it goes in front of there; null = at the end. */
+		before: BarId | null;
+		caret: { x: number; y: number; w: number; h: number } | null;
+	};
+	let drag = $state<Drag | null>(null);
+
+	function setCustomizing(on: boolean) {
+		customizing = on;
+		drag = null;
+		pop = '';
+	}
+
+	/** Over a capsule: that capsule (joining it). Else the screen in thirds:
+	 *  corners and edge middles are anchors, the middle is "cancel". */
+	function zoneAt(x: number, y: number): Anchor | null {
+		const SLACK = 10;
+		for (const el of document.querySelectorAll<HTMLElement>('.group[data-anchor]')) {
+			const r = el.getBoundingClientRect();
+			if (x > r.left - SLACK && x < r.right + SLACK && y > r.top - SLACK && y < r.bottom + SLACK) {
+				return el.dataset.anchor as Anchor;
+			}
+		}
+		const col = Math.min(2, Math.floor((3 * x) / canvasWidth));
+		const row = Math.min(2, Math.floor((3 * y) / canvasHeight));
+		if (row === 1) return col === 0 ? 'left' : col === 2 ? 'right' : null;
+		return `${row === 0 ? 'top' : 'bottom'}-${(['start', 'center', 'end'] as const)[col]}`;
+	}
+
+	function startDrag(e: PointerEvent, id: BarId) {
+		if (!customizing || e.button !== 0) return;
+		e.preventDefault();
+		drag = { id, x: e.clientX, y: e.clientY, to: null, before: null, caret: null };
+		moveDrag(e);
+	}
+
+	function moveDrag(e: PointerEvent) {
+		if (!drag) return;
+		const { id } = drag;
+		const zone = zoneAt(e.clientX, e.clientY);
+		const to = zone && fits(id, zone) ? zone : null;
+		let before: BarId | null = null;
+		let caret: Drag['caret'] = null;
+		if (to && present(to)) {
+			// Between which of the capsule's bars it would land.
+			const col = isColumn(to);
+			const segs = [...document.querySelectorAll<HTMLElement>(`[data-anchor="${to}"] [data-bar]`)]
+				.filter((el) => el.dataset.bar !== id)
+				.map((el) => ({ id: el.dataset.bar as BarId, r: el.getBoundingClientRect() }));
+			const at = (p: number) => (col ? e.clientY > p : e.clientX > p);
+			const i = segs.filter((s) => at(col ? s.r.top + s.r.height / 2 : s.r.left + s.r.width / 2)).length;
+			before = segs[i]?.id ?? null;
+			const ref = segs[i]?.r ?? segs[i - 1]?.r;
+			if (ref) {
+				const edge = segs[i] ? (col ? ref.top : ref.left) - 3 : (col ? ref.bottom : ref.right) + 1;
+				caret = col ? { x: ref.left, y: edge, w: ref.width, h: 3 } : { x: edge, y: ref.top, w: 3, h: ref.height };
+			}
+		}
+		drag = { id, x: e.clientX, y: e.clientY, to, before, caret };
+	}
+
+	function endDrag() {
+		if (!drag) return;
+		const { id, to, before } = drag;
+		drag = null;
+		if (!to) return;
+		const there = bars.at(to).filter((b) => b !== id);
+		bars.move(id, to, before ? there.indexOf(before) : there.length);
+	}
+
 	// Ink preview in the size/colour panel: thickness at 100% zoom, like on paper.
 	const previewWidth = $derived(Math.max(1.2, Math.min(strokeWidth, 44)));
 </script>
@@ -503,10 +737,15 @@
 <svelte:window
 	onkeydown={onKey}
 	onpointerdown={onWindowPointerDown}
-	onpointermove={() => focus && revealFocusBar()}
+	onpointermove={(e) => {
+		if (focus) revealFocusBar();
+		moveDrag(e);
+	}}
+	onpointerup={endDrag}
+	onpointercancel={() => (drag = null)}
 />
 
-<div class="app" class:inking class:focus class:idle={focus && !focusBar} class:dock={!focus && showRail}>
+<div class="app" class:inking class:focus class:customizing class:idle={focus && !focusBar}>
 	<main class="stage">
 		<DrawingCanvas
 			bind:this={canvasRef}
@@ -532,114 +771,211 @@
 		/>
 	</main>
 
-	{#if !focus}
-		<div class="topbar" transition:fly={{ y: -16, duration: 260 }}>
-			<!-- Masthead: back, the note's name, who we are, whether we're live. -->
-			<div class="chrome masthead">
-				<button class="ibtn" onclick={onleave} title="All notes" aria-label="All notes"><Icon name="back" /></button>
-				<div class="ident">
-					<span class="name" title={entry.name}>{entry.name}</span>
-					<span class="kicker meta">
-						<span class="role" data-role={entry.ownerKey ? 'owner' : entry.role}>{roleLabel}</span>
-						<span class="sep">/</span>
-						<span class="dot" data-status={noteStore.status}></span>{statusWord}
-					</span>
-				</div>
+	<!-- What each bar holds; where it sits is the layout's business. -->
+	{#snippet barBody(id: BarId, col: boolean)}
+		{#if id === 'title'}
+			<!-- Back, the note's name, who we are, whether we're live. -->
+			<button class="ibtn" onclick={onleave} title="All notes" aria-label="All notes"><Icon name="back" /></button>
+			<div class="ident">
+				<span class="name" title={entry.name}>{entry.name}</span>
+				<span class="kicker meta">
+					<span class="role" data-role={entry.ownerKey ? 'owner' : entry.role}>{roleLabel}</span>
+					<span class="sep">/</span>
+					<span class="dot" data-status={noteStore.status}></span>{statusWord}
+				</span>
 			</div>
-
-			<!-- Top right: people, share, focus, more. -->
-			<div class="chrome corner">
+		{:else if id === 'people'}
+			<!-- People, share, bring everyone here, focus, more. -->
+			<button
+				class="people"
+				class:on={pop === 'people'}
+				data-pop
+				onclick={(e) => toggle('people', e)}
+				title="Who's here"
+				aria-label="Who's here"
+			>
+				{#if noteStore.presence.length > 0}
+					<span class="faces">
+						{#each noteStore.presence.slice(0, 4) as p (p.id)}
+							<span class="bead" style:background={p.color}></span>
+						{/each}
+					</span>
+					<span class="count">{noteStore.presence.length + 1}</span>
+				{:else}
+					<Icon name="users" size={18} />
+					<span class="count solo">1</span>
+				{/if}
+			</button>
+			<span class={col ? 'hr' : 'vr'}></span>
+			<button class="ibtn" class:on={pop === 'share'} data-pop onclick={(e) => toggle('share', e)} title="Share" aria-label="Share">
+				<Icon name="link" />
+			</button>
+			{#if entry.ownerKey}
 				<button
-					class="people"
-					class:on={pop === 'people'}
-					data-pop
-					onclick={() => toggle('people')}
-					title="Who's here"
-					aria-label="Who's here"
+					class="ibtn"
+					class:on={pullSent}
+					disabled={noteStore.peers <= 1 || noteStore.access !== 'ok'}
+					onclick={pullEveryone}
+					title="Bring everyone here: move everyone else's view to what you see now"
+					aria-label="Bring everyone here"
 				>
-					{#if noteStore.presence.length > 0}
-						<span class="faces">
-							{#each noteStore.presence.slice(0, 4) as p (p.id)}
-								<span class="bead" style:background={p.color}></span>
-							{/each}
-						</span>
-						<span class="count">{noteStore.presence.length + 1}</span>
-					{:else}
-						<Icon name="users" size={18} />
-						<span class="count solo">1</span>
+					<Icon name={pullSent ? 'check' : 'gather'} />
+				</button>
+			{/if}
+			<button class="ibtn" onclick={() => setFocus(true)} title="Focus mode (F): only the note, following along" aria-label="Focus mode">
+				<Icon name="focus" />
+			</button>
+			<button class="ibtn" class:on={pop === 'more'} data-pop onclick={(e) => toggle('more', e)} title="More" aria-label="More">
+				<Icon name="more" />
+			</button>
+		{:else if id === 'view'}
+			<!-- Zoom, fit, follow. -->
+			<button class="ibtn pm" onclick={() => zoomBy(0.8)} aria-label="Zoom out" title="Zoom out (−)"><Icon name="minus" size={18} /></button>
+			<button class="pct" onclick={resetView} title="Back to 100% (0)">{zoomPct}<small>%</small></button>
+			<button class="ibtn pm" onclick={() => zoomBy(1.25)} aria-label="Zoom in" title="Zoom in (+)"><Icon name="plus" size={18} /></button>
+			<span class="pm {col ? 'hr' : 'vr'}"></span>
+			<button
+				class="word"
+				onclick={() => {
+					follow = null;
+					fit();
+				}}
+				title="Frame the whole drawing (1)">Fit</button
+			>
+			<button
+				class="word"
+				class:on={follow !== null}
+				onclick={() => followWho(follow === null ? 'drawing' : null)}
+				title="Keep the whole drawing in view as it grows. Panning or zooming lets go."
+			>
+				{#if followed}
+					<span class="pip" style:background={followed.color}></span>
+				{/if}
+				Follow
+			</button>
+		{:else if showRail}
+			<!-- Tools: the pen case. -->
+			{#each TOOLS as t (t.id)}
+				<button
+					class="tool"
+					class:on={tool === t.id}
+					onclick={() => pickTool(t.id)}
+					title={`${t.label} (${t.key})${t.hint ? ` — ${t.hint}` : ''}`}
+					aria-label={t.label}
+					aria-pressed={tool === t.id}
+				>
+					<Icon name={t.icon} size={21} />
+					{#if isBrush(t.id)}
+						<span class="tip" style:background={inks[t.id].color}></span>
 					{/if}
 				</button>
-				<span class="vr"></span>
-				<button class="ibtn" class:on={pop === 'share'} data-pop onclick={() => toggle('share')} title="Share" aria-label="Share">
-					<Icon name="link" />
-				</button>
-				{#if entry.ownerKey}
-					<button
-						class="ibtn"
-						class:on={pullSent}
-						disabled={noteStore.peers <= 1 || noteStore.access !== 'ok'}
-						onclick={pullEveryone}
-						title="Bring everyone here: move everyone else's view to what you see now"
-						aria-label="Bring everyone here"
-					>
-						<Icon name={pullSent ? 'check' : 'gather'} />
-					</button>
-				{/if}
-				<button class="ibtn" onclick={() => setFocus(true)} title="Focus mode (F): only the note, following along" aria-label="Focus mode">
-					<Icon name="focus" />
-				</button>
-				<button class="ibtn" class:on={pop === 'more'} data-pop onclick={() => toggle('more')} title="More" aria-label="More">
-					<Icon name="more" />
-				</button>
-			</div>
-		</div>
+			{/each}
+			<span class={col ? 'hr' : 'vr'}></span>
+			<button
+				class="ink"
+				class:on={pop === 'ink'}
+				data-pop
+				onclick={(e) => toggle('ink', e)}
+				title={`${BRUSHES[brush].label}: colour and size`}
+				aria-label={`${BRUSHES[brush].label} colour and size`}
+			>
+				<span class="dish"><span class="blob" style:background={color} style:--w="{Math.min(20, 4 + strokeWidth * 0.55)}px"></span></span>
+			</button>
+			<span class={col ? 'hr' : 'vr'}></span>
+			<button class="tool" onclick={() => noteStore.undo()} disabled={!noteStore.canUndo} title="Undo (Ctrl+Z)" aria-label="Undo">
+				<Icon name="undo" size={20} />
+			</button>
+			<button class="tool" onclick={() => noteStore.redo()} disabled={!noteStore.canRedo} title="Redo (Ctrl+Shift+Z)" aria-label="Redo">
+				<Icon name="redo" size={20} />
+			</button>
+		{:else}
+			<span class="kicker">Look only</span>
+			<button class="mini lime" onclick={() => (mode = 'draw')}>Draw</button>
+		{/if}
+	{/snippet}
 
-		<!-- Tools: the pen case on the left edge. -->
-		{#if showRail}
-			<nav class="chrome rail" aria-label="Tools" transition:fly|global={{ x: -24, duration: 260 }}>
-				{#each TOOLS as t (t.id)}
-					<button
-						class="tool"
-						class:on={tool === t.id}
-						onclick={() => pickTool(t.id)}
-						title={`${t.label} (${t.key})${t.hint ? ` — ${t.hint}` : ''}`}
-						aria-label={t.label}
-						aria-pressed={tool === t.id}
+	<!-- One capsule per anchor: its bars side by side, and a tab that tucks it away. -->
+	{#snippet group(a: Anchor)}
+		{@const ids = shown(a)}
+		{#if ids.length && !bars.isHidden(a)}
+			{@const col = isColumn(a)}
+			{@const p = rows.places[a]}
+			{@const tuck = a.endsWith('-end')}
+			<div
+				class="chrome group {a}"
+				class:col
+				data-anchor={a}
+				style:left={p && !col ? `${p.x}px` : undefined}
+				style:top={p && a.startsWith('top') ? `${p.y}px` : undefined}
+				style:bottom={p && a.startsWith('bottom') ? `${p.y}px` : undefined}
+				bind:offsetWidth={groupW[a]}
+				bind:offsetHeight={groupH[a]}
+				transition:fly={tuckFly(a)}
+			>
+				{#if tuck}{@render tucker(a)}{/if}
+				{#each ids as id, i (id)}
+					{#if i}<span class="join {col ? 'hr' : 'vr'}"></span>{/if}
+					<div
+						class="bar {id === 'title' ? 'masthead' : id === 'people' ? 'corner' : id === 'view' ? 'zoombar' : showRail ? 'rail' : 'lookonly'}"
+						class:col
+						class:dragging={drag?.id === id}
+						data-bar={id}
+						role="toolbar"
+						tabindex="-1"
+						aria-label={BAR_NAMES[id]}
+						style:max-width={id === 'title' && rows.titleMax ? `${rows.titleMax}px` : undefined}
+						bind:offsetWidth={segW[id]}
+						onpointerdown={(e) => startDrag(e, id)}
 					>
-						<Icon name={t.icon} size={21} />
-						{#if isBrush(t.id)}
-							<span class="tip" style:background={inks[t.id].color}></span>
-						{/if}
-					</button>
+						{@render barBody(id, col)}
+					</div>
 				{/each}
-				<span class="hr"></span>
-				<button
-					class="ink"
-					class:on={pop === 'ink'}
-					data-pop
-					onclick={() => toggle('ink')}
-					title={`${BRUSHES[brush].label}: colour and size`}
-					aria-label={`${BRUSHES[brush].label} colour and size`}
-				>
-					<span class="dish"><span class="blob" style:background={color} style:--w="{Math.min(20, 4 + strokeWidth * 0.55)}px"></span></span>
-				</button>
-				<span class="hr"></span>
-				<button class="tool" onclick={() => noteStore.undo()} disabled={!noteStore.canUndo} title="Undo (Ctrl+Z)" aria-label="Undo">
-					<Icon name="undo" size={20} />
-				</button>
-				<button class="tool" onclick={() => noteStore.redo()} disabled={!noteStore.canRedo} title="Redo (Ctrl+Shift+Z)" aria-label="Redo">
-					<Icon name="redo" size={20} />
-				</button>
-			</nav>
-		{:else if canEdit}
-			<div class="chrome lookonly" transition:fly|global={{ x: -24, duration: 260 }}>
-				<span class="kicker">Look only</span>
-				<button class="mini lime" onclick={() => (mode = 'draw')}>Draw</button>
+				{#if !tuck}{@render tucker(a)}{/if}
 			</div>
 		{/if}
+	{/snippet}
+
+	{#snippet tucker(a: Anchor)}
+		<button class="tuck" onclick={() => bars.setHidden(a, true)} title="Tuck away (tap the tab at the edge to bring it back)" aria-label={`Hide ${groupLabel(a)}`}>
+			<Icon name={TUCK[a]} size={14} stroke={2.25} />
+		</button>
+	{/snippet}
+
+	{#if !focus}
+		<div class="edge top" bind:clientWidth={rowWidth} transition:fly={{ y: -16, duration: 260 }}>
+			{@render group('top-start')}
+			{@render group('top-center')}
+			{@render group('top-end')}
+		</div>
+		<div class="edge bottom" transition:fly={{ y: 16, duration: 260 }}>
+			{@render group('bottom-start')}
+			{@render group('bottom-center')}
+			{@render group('bottom-end')}
+		</div>
+		<div class="side left" transition:fly={{ x: -24, duration: 260 }}>{@render group('left')}</div>
+		<div class="side right" transition:fly={{ x: 24, duration: 260 }}>{@render group('right')}</div>
+
+		<!-- Tucked-away capsules: a quarter circle in a corner, a tab on an edge. -->
+		{#each ANCHORS as a (a)}
+			{#if shown(a).length && bars.isHidden(a)}
+				{@const icon = stubIcon(a)}
+				<button
+					class="chrome tucked {a}"
+					class:quarter={isCorner(a)}
+					onclick={() => bars.setHidden(a, false)}
+					title={`Show ${groupLabel(a)}`}
+					aria-label={`Show ${groupLabel(a)}`}
+					transition:scale={{ start: 0.3, duration: 220 }}
+				>
+					<span class="mark">
+						{#if icon}<Icon name={icon} size={isCorner(a) ? 18 : 14} />{:else}<span class="dot" data-status={noteStore.status}></span>{/if}
+					</span>
+				</button>
+			{/if}
+		{/each}
 
 		{#if pop === 'ink' && showRail}
-			<div class="pop inkpop" data-pop transition:scale={{ start: 0.96, duration: 160 }}>
+			<div class="pop inkpop" style={popStyle} data-pop transition:scale={{ start: 0.96, duration: 160 }}>
 				<div class="pophead">
 					<span class="serif">{BRUSHES[brush].label}</span>
 					<span class="kicker">{strokeWidth.toFixed(1)} pt</span>
@@ -677,36 +1013,9 @@
 			</div>
 		{/if}
 
-		<!-- View: zoom, fit, follow. -->
-		<div class="chrome zoombar" transition:fly={{ y: 16, duration: 260 }}>
-			<button class="ibtn" onclick={() => zoomBy(0.8)} aria-label="Zoom out" title="Zoom out (−)"><Icon name="minus" size={18} /></button>
-			<button class="pct" onclick={resetView} title="Back to 100% (0)">{zoomPct}<small>%</small></button>
-			<button class="ibtn" onclick={() => zoomBy(1.25)} aria-label="Zoom in" title="Zoom in (+)"><Icon name="plus" size={18} /></button>
-			<span class="vr"></span>
-			<button
-				class="word"
-				onclick={() => {
-					follow = null;
-					fit();
-				}}
-				title="Frame the whole drawing (1)">Fit</button
-			>
-			<button
-				class="word"
-				class:on={follow !== null}
-				onclick={() => followWho(follow === null ? 'drawing' : null)}
-				title="Keep the whole drawing in view as it grows. Panning or zooming lets go."
-			>
-				{#if followed}
-					<span class="pip" style:background={followed.color}></span>
-				{/if}
-				Follow
-			</button>
-		</div>
-
 		<!-- Panels from the top-right corner. -->
 		{#if pop === 'people'}
-			<div class="pop corner-pop" data-pop transition:scale={{ start: 0.96, duration: 160 }}>
+			<div style={popStyle} class="pop corner-pop" data-pop transition:scale={{ start: 0.96, duration: 160 }}>
 				<div class="pophead">
 					<span class="serif">On this note</span>
 					<span class="kicker">{noteStore.presence.length + 1} here</span>
@@ -745,7 +1054,7 @@
 				<p class="fine kicker">{syncDetail}</p>
 			</div>
 		{:else if pop === 'share'}
-			<div class="pop corner-pop ticketwrap" data-pop transition:scale={{ start: 0.96, duration: 160 }}>
+			<div style={popStyle} class="pop corner-pop ticketwrap" data-pop transition:scale={{ start: 0.96, duration: 160 }}>
 				<div class="ticket">
 					<div class="stub">
 						<span class="kicker">Admit · join link</span>
@@ -770,7 +1079,7 @@
 				</div>
 			</div>
 		{:else if pop === 'more'}
-			<div class="pop corner-pop menu" data-pop transition:scale={{ start: 0.96, duration: 160 }}>
+			<div style={popStyle} class="pop corner-pop menu" data-pop transition:scale={{ start: 0.96, duration: 160 }}>
 				<span class="kicker sect">Document</span>
 				{#if canEdit}
 					<button
@@ -804,6 +1113,10 @@
 						<Icon name="magnet" size={18} /><span>Snap to pages</span><span class="kicker" class:lit={snap}>{snap ? 'on' : 'off'}</span>
 					</button>
 				{/if}
+				<span class="kicker sect">Screen</span>
+				<button class="item" onclick={() => setCustomizing(true)} title="Move the bars to other edges and corners, join them, tuck them away (this device)">
+					<Icon name="layout" size={18} /><span>Customize bars</span><span class="kicker">move · join</span>
+				</button>
 				{#if canEdit}
 					<span class="kicker sect">Ink</span>
 					<button
@@ -872,6 +1185,25 @@
 		<input type="file" accept="application/pdf,.pdf" hidden bind:this={pdfInput} onchange={importPdf} />
 	{/if}
 
+	<!-- Customising the bars: where a dragged bar would land. -->
+	{#if customizing && !focus}
+		<div class="zones" class:dragging={drag !== null}>
+			{#each ANCHORS as a (a)}
+				<div class="zone {a}" class:hot={drag?.to === a} class:off={drag !== null && !fits(drag.id, a)}>
+					<span class="kicker">{ANCHOR_NAMES[a]}</span>
+				</div>
+			{/each}
+		</div>
+		{#if drag}
+			{#if drag.caret}
+				<div class="caret" style:left="{drag.caret.x}px" style:top="{drag.caret.y}px" style:width="{drag.caret.w}px" style:height="{drag.caret.h}px"></div>
+			{/if}
+			<div class="ghost kicker" style:left="{drag.x}px" style:top="{drag.y}px">
+				{BAR_NAMES[drag.id]}{drag.to ? ` → ${ANCHOR_NAMES[drag.to]}` : ''}
+			</div>
+		{/if}
+	{/if}
+
 	<!-- Focus mode: one quiet bar that comes and goes with movement. -->
 	{#if focus && focusBar}
 		<div
@@ -911,7 +1243,17 @@
 	{/if}
 
 	<!-- Notices, top centre. -->
-	<div class="notices" aria-live="polite">
+	<div class="notices" aria-live="polite" style:--toprow="{focus ? 0 : rows.height.top}px">
+		{#if customizing && !focus}
+			<div class="notice custom" role="status" transition:fly={{ y: -12, duration: 220 }}>
+				<span class="kicker lime">Bars</span>
+				<span>Drag a bar to an edge or corner, or onto another bar to join them. The little arrow on each tucks it away.</span>
+				<span class="row">
+					<button class="mini" onclick={() => bars.reset()}>Reset</button>
+					<button class="mini lime" onclick={() => setCustomizing(false)}>Done</button>
+				</span>
+			</div>
+		{/if}
 		{#if pulledBy}
 			<div class="notice" role="status" transition:fly={{ y: -12, duration: 220 }}>
 				<span class="pip" style:background={pulledBy.color}></span>
@@ -1065,36 +1407,338 @@
 		letter-spacing: 0.005em;
 	}
 
-	/* Top: masthead left, corner right; one row so they can't overlap. */
-	.topbar {
+	/* --- Bars: rows along the top and bottom, columns on the sides ------------ */
+
+	/* Rows are placed by hand (see \`rows\`); a row itself takes no input. */
+	.edge {
+		position: absolute;
+		z-index: 3;
+		left: var(--left);
+		right: var(--right);
+		height: 0;
+		pointer-events: none;
+	}
+	.edge.top {
+		top: var(--top);
+	}
+	.edge.bottom {
+		bottom: var(--bottom);
+	}
+	.edge > .group {
+		width: max-content;
+	}
+	.side {
 		position: absolute;
 		z-index: 3;
 		top: var(--top);
-		left: var(--left);
-		right: var(--right);
+		bottom: var(--bottom);
 		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: var(--gap);
+		flex-direction: column;
+		justify-content: center;
 		pointer-events: none;
 	}
-	.topbar > .chrome {
+	.side.left {
+		left: var(--left);
+	}
+	.side.right {
+		right: var(--right);
+	}
+	.side > .group {
 		position: relative;
+	}
+	.group {
 		pointer-events: auto;
 	}
-	.app.inking .topbar > .chrome {
+	.app.inking .group {
 		pointer-events: none;
 	}
-	.masthead {
-		padding-right: 1rem;
-		gap: 0.35rem;
+	.group.col {
+		flex-direction: column;
+		border-radius: 20px;
+	}
+	/* The bars inside a capsule (not app.css's .seg). */
+	.bar {
+		display: flex;
+		align-items: center;
+		gap: 2px;
 		min-width: 0;
+	}
+	.bar.col {
+		flex-direction: column;
+	}
+	.join.vr {
+		margin: 6px 5px;
+		background: rgb(244 240 231 / 0.24);
+	}
+	.join.hr {
+		margin: 5px 6px;
+		background: rgb(244 240 231 / 0.24);
+	}
+	/* The tab that tucks a capsule away: slim, out of the way. */
+	.tuck {
+		display: grid;
+		place-items: center;
+		flex: none;
+		width: 18px;
+		height: 40px;
+		padding: 0;
+		border: none;
+		border-radius: 10px;
+		background: transparent;
+		color: var(--graphite);
+		cursor: pointer;
+		transition:
+			color 0.15s,
+			background 0.15s;
+	}
+	.group.col .tuck {
+		width: 40px;
+		height: 18px;
+	}
+	.tuck:hover {
+		color: var(--chalk);
+		background: var(--ink-3);
+	}
+
+	/* A tucked-away capsule: a quarter circle in its corner, a tab on its edge. */
+	.tucked {
+		padding: 0;
+		border: none;
+		border-radius: 0;
+		cursor: pointer;
+		--sl: env(safe-area-inset-left);
+		--sr: env(safe-area-inset-right);
+		--st: env(safe-area-inset-top);
+		--sb: env(safe-area-inset-bottom);
+	}
+	.mark {
+		position: absolute;
+		display: grid;
+		place-items: center;
+		width: 18px;
+		height: 18px;
+	}
+	.mark .dot {
+		width: 10px;
+		height: 10px;
+	}
+	.tucked.quarter {
+		width: 54px;
+		height: 54px;
+	}
+	.tucked.top-start {
+		top: 0;
+		left: 0;
+		width: calc(54px + var(--sl));
+		height: calc(54px + var(--st));
+		border-bottom-right-radius: 100%;
+		transform-origin: top left;
+	}
+	.tucked.top-end {
+		top: 0;
+		right: 0;
+		width: calc(54px + var(--sr));
+		height: calc(54px + var(--st));
+		border-bottom-left-radius: 100%;
+		transform-origin: top right;
+	}
+	.tucked.bottom-start {
+		bottom: 0;
+		left: 0;
+		width: calc(54px + var(--sl));
+		height: calc(54px + var(--sb));
+		border-top-right-radius: 100%;
+		transform-origin: bottom left;
+	}
+	.tucked.bottom-end {
+		bottom: 0;
+		right: 0;
+		width: calc(54px + var(--sr));
+		height: calc(54px + var(--sb));
+		border-top-left-radius: 100%;
+		transform-origin: bottom right;
+	}
+	.tucked.top-start .mark {
+		top: calc(var(--st) + 13px);
+		left: calc(var(--sl) + 13px);
+	}
+	.tucked.top-end .mark {
+		top: calc(var(--st) + 13px);
+		right: calc(var(--sr) + 13px);
+	}
+	.tucked.bottom-start .mark {
+		bottom: calc(var(--sb) + 13px);
+		left: calc(var(--sl) + 13px);
+	}
+	.tucked.bottom-end .mark {
+		bottom: calc(var(--sb) + 13px);
+		right: calc(var(--sr) + 13px);
+	}
+	.tucked.top-center,
+	.tucked.bottom-center {
+		left: 50%;
+		translate: -50% 0;
+		width: 60px;
+	}
+	.tucked.top-center {
+		top: 0;
+		height: calc(24px + var(--st));
+		border-radius: 0 0 14px 14px;
+		transform-origin: top center;
+	}
+	.tucked.bottom-center {
+		bottom: 0;
+		height: calc(24px + var(--sb));
+		border-radius: 14px 14px 0 0;
+		transform-origin: bottom center;
+	}
+	.tucked.top-center .mark {
+		bottom: 3px;
+		left: calc(50% - 9px);
+	}
+	.tucked.bottom-center .mark {
+		top: 3px;
+		left: calc(50% - 9px);
+	}
+	.tucked.left,
+	.tucked.right {
+		top: 50%;
+		translate: 0 -50%;
+		height: 60px;
+	}
+	.tucked.left {
+		left: 0;
+		width: calc(24px + var(--sl));
+		border-radius: 0 14px 14px 0;
+		transform-origin: center left;
+	}
+	.tucked.right {
+		right: 0;
+		width: calc(24px + var(--sr));
+		border-radius: 14px 0 0 14px;
+		transform-origin: center right;
+	}
+	.tucked.left .mark {
+		right: 3px;
+		top: calc(50% - 9px);
+	}
+	.tucked.right .mark {
+		left: 3px;
+		top: calc(50% - 9px);
+	}
+	.tucked:hover {
+		background: var(--ink-2);
+	}
+
+	/* Customising: every bar is a handle; the screen shows where it can go. */
+	.app.customizing .bar {
+		cursor: grab;
+		border-radius: 12px;
+		outline: 1.5px dashed rgb(214 242 75 / 0.55);
+		outline-offset: -1px;
+		touch-action: none;
+	}
+	.app.customizing .bar > * {
+		pointer-events: none;
+	}
+	.bar.dragging {
+		opacity: 0.35;
+	}
+	.zones {
+		position: absolute;
+		inset: 0;
+		z-index: 2;
+		display: grid;
+		grid-template: repeat(3, 1fr) / repeat(3, 1fr);
+		gap: 6px;
+		padding: 6px;
+		background: rgb(25 24 20 / 0.08);
+	}
+	.zones.dragging {
+		cursor: grabbing;
+	}
+	.zone {
+		display: grid;
+		place-items: center;
+		border: 1.5px dashed rgb(25 24 20 / 0.18);
+		border-radius: 18px;
+		color: var(--graphite);
+		transition:
+			background 0.15s,
+			border-color 0.15s,
+			opacity 0.15s;
+	}
+	.zone .kicker {
+		opacity: 0;
+		transition: opacity 0.15s;
+	}
+	.zones.dragging .zone .kicker {
+		opacity: 0.8;
+	}
+	.zone.top-start {
+		grid-area: 1 / 1;
+	}
+	.zone.top-center {
+		grid-area: 1 / 2;
+	}
+	.zone.top-end {
+		grid-area: 1 / 3;
+	}
+	.zone.left {
+		grid-area: 2 / 1;
+	}
+	.zone.right {
+		grid-area: 2 / 3;
+	}
+	.zone.bottom-start {
+		grid-area: 3 / 1;
+	}
+	.zone.bottom-center {
+		grid-area: 3 / 2;
+	}
+	.zone.bottom-end {
+		grid-area: 3 / 3;
+	}
+	.zone.hot {
+		background: rgb(214 242 75 / 0.28);
+		border-color: var(--lime-deep);
+		color: var(--ink);
+	}
+	.zone.off {
+		opacity: 0.3;
+	}
+	.caret {
+		position: absolute;
+		z-index: 6;
+		border-radius: 2px;
+		background: var(--lime);
+		box-shadow: 0 0 0 1px var(--ink);
+		pointer-events: none;
+	}
+	.ghost {
+		position: absolute;
+		z-index: 6;
+		translate: 14px 14px;
+		padding: 0.45rem 0.75rem;
+		border-radius: 999px;
+		background: var(--lime);
+		color: var(--ink);
+		box-shadow: var(--shadow-float);
+		white-space: nowrap;
+		pointer-events: none;
+	}
+
+	.masthead {
+		padding-right: 0.6rem;
+		gap: 0.35rem;
+		min-width: 48px;
 		max-width: 24rem;
 	}
 	.ident {
 		display: flex;
 		flex-direction: column;
 		min-width: 0;
+		overflow: hidden;
 		line-height: 1.05;
 	}
 	.name {
@@ -1143,10 +1787,6 @@
 		}
 	}
 
-	/* Corner */
-	.corner {
-		flex: none;
-	}
 	.people {
 		padding: 0 0.6rem 0 0.55rem;
 	}
@@ -1183,15 +1823,7 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	/* Rail */
-	.rail {
-		left: var(--left);
-		top: 50%;
-		transform: translateY(-50%);
-		flex-direction: column;
-		padding: 5px;
-		border-radius: 20px;
-	}
+	/* Tools */
 	.tool {
 		position: relative;
 		width: 44px;
@@ -1239,78 +1871,52 @@
 			height 0.15s;
 	}
 	@media (max-height: 560px) {
-		.tool,
-		.ink {
+		.rail.col :is(.tool, .ink) {
 			width: 36px;
 			height: 34px;
 		}
-		.rail {
-			padding: 3px;
-		}
 	}
-	/* Phones: the tools become a dock along the bottom, in thumb reach; the
-	   zoom bar sits above it, without ± (that's what pinching is for). */
+	/* Phones: a row of tools narrows to fit 360px; the zoom bar drops ±
+	   (that's what pinching is for). */
 	@media (max-width: 600px) {
-		.rail {
-			top: auto;
-			left: 50%;
-			bottom: var(--bottom);
-			transform: translateX(-50%);
-			flex-direction: row;
-			padding: 4px;
-			border-radius: 18px;
+		.rail:not(.col) {
+			gap: 1px;
 		}
-		.rail .hr {
-			width: 1px;
-			height: auto;
-			margin: 8px 3px;
-		}
-		.tool,
-		.ink {
-			width: 36px;
+		/* nine buttons share what's left of the width */
+		.rail:not(.col) :is(.tool, .ink) {
+			width: clamp(28px, calc((100vw - 84px) / 9), 36px);
 			min-width: 0;
 			height: 42px;
 			border-radius: 12px;
 		}
-		.app.dock .zoombar {
-			bottom: calc(var(--bottom) + 62px);
+		.rail:not(.col) .vr {
+			margin: 8px 3px;
 		}
-		.zoombar .ibtn,
-		.zoombar .vr {
+		.zoombar .pm {
 			display: none;
 		}
-		/* (.app: outranks the wide-screen .inkpop rule further down) */
-		.app .inkpop {
-			left: 50%;
-			top: auto;
-			bottom: calc(var(--bottom) + 62px);
-			transform: translateX(-50%);
-			transform-origin: bottom center;
-			width: min(19rem, calc(100% - 2 * var(--gap)));
+		.group:not(.col) .tuck {
+			width: 14px;
 		}
 	}
 	@media (max-width: 380px) {
-		.tool,
-		.ink {
-			width: 32px;
-		}
-		.rail .hr {
+		.rail:not(.col) .vr {
 			margin-inline: 1px;
+		}
+		.group:not(.col) :is(.ibtn, .people) {
+			min-width: 34px;
+		}
+		.group:not(.col) .tuck {
+			width: 12px;
 		}
 	}
 	.lookonly {
-		left: var(--left);
-		bottom: var(--bottom);
 		gap: 0.6rem;
-		padding-left: 0.9rem;
+		padding-left: 0.6rem;
 		color: var(--smoke);
 	}
 
 	/* Zoom bar */
-	.zoombar {
-		right: var(--right);
-		bottom: var(--bottom);
-	}
 	.pct {
 		min-width: 3.6rem;
 		padding: 0 0.3rem;
@@ -1330,6 +1936,10 @@
 		letter-spacing: 0.1em;
 		text-transform: uppercase;
 		padding: 0 0.75rem;
+	}
+	.zoombar.col .word {
+		padding: 0 0.5rem;
+		font-size: 0.64rem;
 	}
 	.pip {
 		width: 8px;
@@ -1371,16 +1981,14 @@
 		color: var(--ink);
 		border-radius: 22px;
 		box-shadow: var(--shadow-card), 0 0 0 1px var(--rule);
-		transform-origin: top right;
 		cursor: default;
-	}
-	.corner-pop {
-		top: calc(var(--top) + 58px);
-		right: var(--right);
-		width: min(22rem, calc(100% - 2 * var(--gap)));
-		max-height: calc(100% - var(--top) - 70px - var(--bottom));
+		/* placed by popStyle, off the button that opened it */
+		width: var(--pw);
 		overflow-y: auto;
 		touch-action: pan-y;
+	}
+	.corner-pop {
+		--pw: min(22rem, calc(100% - 2 * var(--gap)));
 	}
 	.pophead {
 		display: flex;
@@ -1406,14 +2014,13 @@
 		line-height: 1.6;
 	}
 
-	/* Beside the rail on wide screens; above the dock on phones. */
 	.inkpop {
-		position: absolute;
-		left: calc(var(--left) + 70px);
-		top: 50%;
-		transform: translateY(-50%);
-		transform-origin: left center;
-		width: 15.5rem;
+		--pw: min(15.5rem, calc(100% - 2 * var(--gap)));
+	}
+	@media (max-width: 600px) {
+		.inkpop {
+			--pw: min(19rem, calc(100% - 2 * var(--gap)));
+		}
 	}
 	.preview {
 		width: 100%;
@@ -1797,7 +2404,7 @@
 	.notices {
 		position: absolute;
 		z-index: 5;
-		top: calc(var(--top) + 60px);
+		top: calc(var(--top) + var(--toprow, 48px) + 12px);
 		left: 50%;
 		transform: translateX(-50%);
 		display: flex;
@@ -1806,9 +2413,6 @@
 		gap: 8px;
 		width: min(34rem, calc(100% - 2 * var(--gap)));
 		pointer-events: none;
-	}
-	.app.focus .notices {
-		top: var(--top);
 	}
 	.notice {
 		display: flex;

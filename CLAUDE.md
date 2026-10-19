@@ -99,6 +99,18 @@ chosen device.
   the turn (never stopping). The
   path's math (endpoints exact, edges monotonic, shape kept) checked
   separately.
+  Bars round (28 + 10 checks): defaults leave the bottom-right quarter
+  empty; the title tucks into a quarter circle at the corner with the live
+  dot, the tools into a left-edge tab, both survive a reload and come back on
+  tap; customising makes buttons inert, moves the zoom bar to the bottom
+  left, joins it into the tools' capsule (standing up) and reorders inside
+  it, refuses the title on a side, cancels in the middle, keeps a top-centre
+  capsule centred to the pixel; Esc, persistence, Reset; menus and the colour
+  panel open next to their (moved) buttons; bars still fade while drawing;
+  at 390/360/320px the dock and rows fit, the zoom bar wraps above the dock,
+  the colour panel opens above it; observers get no tools capsule; focus,
+  Look only, tool keys and undo still work; a title joined top right tucks
+  into the top-right quarter; a bad stored layout falls back to defaults.
   Design round (21 checks, headless Chrome): chrome fades to 10% and lets the
   pen through mid-stroke and returns after; tool keys, Ctrl+Z / Ctrl+Shift+Z;
   colour pick reaches the pen; a tap outside closes panels; an observer opens
@@ -594,15 +606,29 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   anything you read or press; `--f-mono` (DM Mono, the `.kicker` class:
   uppercase, tracked) for labels, numbers and status. Canvas text uses them by
   name too (presence tags mono, page notices serif).
-- **The canvas is full-bleed; the chrome floats** in ink capsules (`.chrome`):
-  masthead + corner in one `.topbar` row (so they can't overlap on phones;
-  the owner's corner also has *Bring everyone here*, next to focus),
-  the tool rail on the left edge, zoom/fit/follow bottom-right. **Phones**
-  (≤600px wide): the rail becomes a bottom dock (thumb reach, sized to fit
-  360px), the zoom bar drops ± and sits above it, and the colour panel opens
-  above the dock (it lives outside the rail for that reason). Rarely used
-  actions live in panels (`pop`: people, share, more, ink — one at a time,
-  closed by a pointerdown outside any `[data-pop]`).
+- **The canvas is full-bleed; the chrome floats** in ink capsules (`.chrome`).
+  Four **bars** — title, people (people/share/*Bring everyone here*/focus/
+  more), view (zoom/fit/follow), tools — sit at eight **anchors** (three
+  along the top, three along the bottom, left, right); the bars at one anchor
+  share a capsule (`.group[data-anchor]`, each bar a `.bar[data-bar]`).
+  `bars.svelte.ts` keeps the layout per device (localStorage `conote:bars`,
+  validated on read), one for wide screens and one for phones (≤600px).
+  Defaults keep the bottom right empty (the writing hand's arm): wide — title
+  top left, view + people joined top right, tools left; phones — tools as a
+  bottom dock in thumb reach, view bottom right (it wraps above the dock).
+  Each capsule has a slim **tuck** tab (chevron): tucked, a corner capsule is a
+  quarter circle in that screen corner (the title's shows the live dot), an
+  edge one a tab on the edge; tapping brings it back. **Customize bars**
+  (⋯ menu): drop zones in screen thirds, drag a bar to an anchor or onto a
+  capsule to join it (caret shows where); the bars' buttons are inert and the
+  canvas is covered meanwhile; the title can't go to the side columns; the
+  middle cancels; Reset/Done (or Esc). The top and bottom rows are placed by
+  hand (`rows` in `NoteView`, from measured widths): a centre capsule stays
+  truly centred, a row too full for one line moves the centre inward (top) or
+  the corners up (bottom), and the title shrinks first (`TITLE_MIN`). Panels
+  (`pop`: people, share, more, ink — one at a time, closed by a pointerdown
+  outside any `[data-pop]`) hang off the button that opened them, clear of
+  its capsule, toward the middle of the screen (`popStyle`).
 - **The chrome steps back while the pen is down.** `DrawingCanvas` calls
   `onactive(true/false)` around strokes and the laser; `NoteView` sets
   `.inking`, and CSS fades `.chrome` to 10% with `pointer-events: none` after
