@@ -1,12 +1,99 @@
 # Roadmap
 
-## Status: the P2P broadcast path is built (v1)
+## Status: server-hosted notes with passcodes (current UI)
 
-Broadcast/join over a WebRTC **star** is implemented and verified end-to-end:
-`server/signal-server.js` (matchmaking only), `src/lib/notes/webrtcStar.ts`
-(transport + enforcement), `src/lib/notes/broadcast.ts` (ids/tokens).
+The app now runs at conote.sniggles.de and the UI follows a **create / join**
+model. Anyone opening the site picks *Join a note* (name + passcode) or *Create
+a note* (name, editor passcode, observer setting). The creator can later change
+the passcodes or delete the note. Many notes run in parallel on one server.
 
-The open questions below are answered as follows; the reasoning is worth keeping:
+The server is the central connecting point: registry, passcode check, token
+minting, matchmaking. Every stroke still goes through the relay, which enforces
+roles (observer writes are dropped) and stores each note so it's complete for
+whoever joins next.
+
+### Done: direct links alongside the relay
+
+Devices on a note now also exchange strokes directly over WebRTC (`p2p.ts`):
+
+- **Star around a hub**, the longest-connected editor — the v1 star, with roles
+  from note tokens instead of a separate edit secret. The hub drops observers'
+  writes; matchmaking (now inside the note server, behind the same token) only
+  forwards signals with the hub at one end, so no other link can form.
+- **Hub handover** when the hub leaves; **revocation** (passcode change, delete)
+  closes matchmaking sockets too, and the hub cuts those links.
+- **Relay fallback is automatic** because the relay never goes away: pairs that
+  can't connect directly (hard NAT, STUN only) just keep using it, and Yjs
+  dedupes what arrives on both paths. This also answers v1's "relay fallback is
+  not automatic".
+- The old open signaling server (`/signal`, `conote-signal`) is gone.
+
+Gained: LAN-latency strokes between devices in the same room, and strokes keep
+flowing between them if the server link drops. **Not** gained yet: less server
+traffic — see below.
+
+### Next: actually take strokes off the server
+
+Today the relay still fans every stroke out to every device, direct link or not.
+Options, roughly in order of effort:
+
+1. **Relay skips devices the hub reaches.** Clients report "direct link open"
+   over matchmaking; the relay stops sending doc updates to them (still accepts
+   their uploads, still stores). Cuts server *egress* to ~one copy per stroke.
+   Risk: a link that dies silently loses strokes until the client notices and
+   tells the relay — needs a resync on link loss (SyncStep1 over the relay).
+2. **Only the hub uploads.** Other devices stop sending to the relay while their
+   link is up. Cuts ingress too, but the server copy now depends on the hub.
+3. **No server copy at all** while someone is online, upload on demand. Closest
+   to "notes belong to the user"; makes "join when nobody's online" depend on
+   a device being online. Still an open product question.
+
+### Done: PDFs
+
+Import a PDF into a note (pages rendered by pdf.js from the vectors at the
+current zoom), draw on its pages, add blank pages beside any page, run pages
+vertically or horizontally, export everything back as a PDF with the original
+pages untouched and the ink as vector paths. See CLAUDE.md "Pages & PDFs".
+
+Open: file GC for unreferenced PDFs; shipping pdf.js standard fonts / CMaps
+(non-embedded fonts, CJK); blank pages in notes without a PDF; moving pages;
+whether "Export" should also offer the free ink beside pages.
+
+### Done: desktop navigation, brushes
+
+Hand tool / Space / middle-drag to pan, wheel scrolls and Ctrl+wheel zooms,
+optional page snapping (direction-aware, animated). Pen, brush and marker ink
+(pressure, or speed from a mouse; tapers; translucent multiplied marker),
+exported faithfully. Open: per-user brush settings that persist across
+sessions; more brushes (pencil texture, dashed). (Keyboard shortcuts: done.)
+
+### Done: design pass
+
+"Paper & ink" look (warm paper, ink chrome, lime accent; serif / grotesk / mono),
+full-bleed canvas with floating chrome that steps back while drawing, panels for
+rarely used actions, keyboard shortcuts for tools, and a focus mode for watching
+devices that can follow the whole note or one device's view. Open: remembering
+brush settings per device; a dark variant of the chrome for dim rooms; letting
+the owner make everyone *follow* (not just a one-shot pull).
+
+### Other candidates
+
+- ~~**Live in-progress strokes.**~~ — done, over awareness after all: each
+  update carries only the points since the last one (`LiveChunk`, every 30 ms),
+  so the whole-state nature doesn't make it grow; ~5 KB/s while drawing with a
+  mouse, more with a 240 Hz pen. Possible follow-up: send the chunks over the
+  direct link too (lower latency; awareness stays the fallback).
+- **Presence over the direct link** — cursors still take the server round trip.
+- **Stronger passcodes.** Weak ones are refused and joins have a per-name
+  budget (20 failures/hour), but a 4-digit PIN still falls to patient guessing
+  (~480 tries/day). Raising the minimum is a UX call.
+- **Off-machine backups.** The daily tarballs (`deploy/backup.sh`) stay on the VPS.
+
+## Earlier: the P2P broadcast path (v1, removed — superseded by direct links)
+
+Broadcast/join over a WebRTC **star** was built and verified end-to-end
+(`signal-server.js`, `webrtcStar.ts`, `broadcast.ts`; see git history at
+149dff3). Its design carried over into `p2p.ts`. The reasoning is worth keeping:
 
 - **Permission enforcement → solved by topology, not crypto.** `y-webrtc` was
   rejected: it is a full mesh with no permission model (its `password` only
@@ -18,22 +105,18 @@ The open questions below are answered as follows; the reasoning is worth keeping
 - **Broadcast ID scheme → split into two secrets.** 8-char id (~39 bits) is the
   room address and grants read-only; a separate 16-char token (~78 bits) grants
   edit. The token travels over the P2P data channel, never through signaling, so
-  the central server cannot mint editors.
+  the central server cannot mint editors. (Moot now: the note server mints the
+  tokens anyway, so it is trusted to tell the hub each device's role.)
 - **NAT traversal → STUN only, deliberately.** TURN would relay the stroke data,
   which is the thing this design exists to avoid. Hard-NAT pairs should fall back
   to the central Yjs relay instead.
 
-### Still open
+What v1 left open, and where it stands:
 
-- **Broadcaster is a single point.** If it drops off, joiners stop syncing. The
-  star is what makes permissions enforceable, so this is an accepted trade.
-- **Relay fallback is not automatic.** A broadcast that can't traverse NAT just
-  fails; nothing yet detects that and switches to `server/sync-server.js`.
-- **A joined note stays read-only after the broadcast ends**, even though it's
-  then just a local copy. Arguably it should become editable — undecided.
-- **Signaling server is unauthenticated and in-memory**, like the relay. Fine for
-  personal/LAN use; internet use needs hosting + abuse limits (nothing rate-limits
-  broadcast-id guessing today).
+- **Broadcaster is a single point** → solved: the hub hands over to the next
+  editor, and the relay carries strokes meanwhile.
+- **Relay fallback is not automatic** → solved: the relay is always connected.
+- **Signaling unauthenticated** → solved: matchmaking needs a note token.
 
 ## North star: decentralized, local-first notes with P2P broadcast
 
@@ -99,7 +182,18 @@ to find each other. Once they've found each other, the actual drawing data flows
   + `?note=<id>` to open a specific note. The index is deliberately local-only,
   so `?note=<id>` is the embryonic form of the join flow above: replace it with a
   real broadcast ID + permission handshake and the UX lands.
-- **Live presence** — show peers' cursors/viewports, not just a peer count.
-- **Stroke polish** — curve smoothing; "fit to content" so the laptop view can
-  auto-frame the whole drawing.
-- **Real PWA icons** — replace the generated placeholder icons in `static/icons/`.
+- ~~**Live presence**~~ — done: others' cursors and visible areas, toggle
+  *Others*.
+- ~~**Zoom-aware smoothing**~~ — done: strokes remember the zoom they were
+  drawn at and are smoothed in those screen pixels, so detail drawn zoomed
+  in survives.
+- ~~**Laser pointer**~~ — done: editors point with a fading trail everyone
+  sees; presence only, nothing stored.
+- ~~**Bring everyone here**~~ — done: the owner pulls every other device onto
+  their view (one-shot; the relay only lets the owner's connection send it).
+  Possible follow-up: a sticky *Lead* mode where the others keep following
+  until they move by hand.
+- ~~**Stroke polish**~~ — done: render-time curve smoothing; *Fit* and *Follow*
+  (keep the whole drawing framed — the laptop-in-a-call view).
+- ~~**Real PWA icons**~~ — done: `static/icons/icon.svg` + rendered PNGs.
+- ~~**Backups**~~ — done: daily tarballs of `/var/lib/conote`, 14 kept.

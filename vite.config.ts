@@ -8,16 +8,17 @@ export default defineConfig({
 		SvelteKitPWA({
 			registerType: 'autoUpdate',
 			manifest: {
-				name: 'Pennable Notes',
-				short_name: 'Pennable',
+				name: 'conote',
+				short_name: 'conote',
 				description: 'Pen-drawing notes with independent per-session zoom and scroll.',
-				theme_color: '#111827',
-				background_color: '#111827',
+				theme_color: '#f4f0e7',
+				background_color: '#f4f0e7',
 				display: 'standalone',
 				orientation: 'any',
 				icons: [
 					{ src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
 					{ src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
+					{ src: '/icons/icon.svg', sizes: 'any', type: 'image/svg+xml' },
 					{
 						src: '/icons/icon-512-maskable.png',
 						sizes: '512x512',
@@ -27,7 +28,7 @@ export default defineConfig({
 				]
 			},
 			workbox: {
-				globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}']
+				globPatterns: ['**/*.{js,mjs,css,html,ico,png,svg,woff2}']
 			}
 		})
 	],

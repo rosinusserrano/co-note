@@ -1,0 +1,10 @@
+[
+	{
+		"relation": ["delegate_permission/common.handle_all_urls"],
+		"target": {
+			"namespace": "android_app",
+			"package_name": "de.sniggles.conote",
+			"sha256_cert_fingerprints": ["A9:23:CE:85:D6:65:CC:8F:6D:F3:71:D0:C6:F5:21:54:1E:12:A2:E8:4F:B5:08:AA:D3:95:D1:4C:D0:92:8B:AA"]
+		}
+	}
+]

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- co-note: one note, two screens (laptop behind, tablet in front), one pen
+       stroke over a highlighter swipe. "Paper & ink" palette: ink #191814,
+       paper #f4f0e7, graphite #6c665a, lime #d6f24b.
+       Source artwork for icon-*.png and ../favicon.png (rendered with headless
+       Chrome). The maskable PNG drops the corner radius and scales #art by 0.78
+       about the centre, into the safe zone. -->
+  <rect width="512" height="512" rx="112" fill="#191814"/>
+  <g id="art">
+    <rect x="84" y="112" width="272" height="188" rx="20" fill="none" stroke="#6c665a" stroke-width="20"/>
+    <rect x="200" y="196" width="228" height="208" rx="24" fill="#f4f0e7" stroke="#f4f0e7" stroke-width="20"/>
+    <path d="M232 318 L398 296" fill="none" stroke="#d6f24b" stroke-width="50" stroke-linecap="round"/>
+    <path d="M238 344 C 258 268, 292 262, 302 318 S 352 356, 388 262" fill="none" stroke="#191814" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

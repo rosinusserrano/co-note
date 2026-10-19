@@ -1,0 +1,13 @@
+[Unit]
+Description=co-note state backup (registry + drawings)
+
+[Service]
+Type=oneshot
+# Root, to read the service's 0700 state dir. Root-owned copy, see update-server.sh.
+ExecStart=/opt/conote/backup.sh
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/backups

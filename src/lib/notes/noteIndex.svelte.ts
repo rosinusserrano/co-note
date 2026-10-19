@@ -1,86 +1,83 @@
-// The list of notes on *this device*.
+// The notes *this device* has created or joined ("My notes").
 //
-// Deliberately local-only (localStorage), and deliberately NOT a Yjs doc: per
-// ROADMAP.md notes belong to the user and live locally, while the only thing
-// that is ever shared is a note you explicitly hand to someone. So the index is
-// not replicated — a peer reaches a specific note by its id (`?note=<id>`),
-// which is the seam the broadcast/join flow will grow out of.
+// Local-only (localStorage), not synced: it's this device's keyring. Each entry
+// holds the token the server issued for it, so reopening a note doesn't ask for
+// the passcode again — the passcode itself is never stored. A creator's entry
+// also keeps the owner key, which is what unlocks the note's settings.
 //
-// Only metadata lives here. The strokes are in noteStore (the Yjs doc); the
-// two are joined by `id`, which is also the sync room (see roomFor()).
+// Only metadata lives here. The strokes are in noteStore (the Yjs doc); the two
+// are joined by `id`, the server's note id (see roomFor()).
 
-import { uid } from './model';
+import type { NoteRole, NoteSession, ViewAccess } from './api';
 
-const STORAGE_KEY = 'pennable:notes';
+const STORAGE_KEY = 'conote:notes';
 
-/** The pre-notes-list note. Seeded on first run so existing drawings survive. */
-export const LEGACY_NOTE_ID = 'default';
-
-export interface NoteMeta {
+export interface NoteEntry {
 	id: string;
-	title: string;
-	createdAt: number;
-}
-
-function seed(): NoteMeta[] {
-	return [{ id: LEGACY_NOTE_ID, title: 'Untitled note', createdAt: Date.now() }];
+	name: string;
+	role: NoteRole;
+	viewAccess: ViewAccess;
+	token: string;
+	/** Only on the device that created the note. */
+	ownerKey?: string;
+	/** With the owner key: marks this device's connection as the owner's, which
+	 *  lets it pull the others' views. Fetched with the key if missing. */
+	ownerProof?: string;
+	openedAt: number;
 }
 
 class NoteIndex {
-	notes = $state<NoteMeta[]>(seed());
+	notes = $state<NoteEntry[]>([]);
 
 	/** Hydrate from localStorage. Safe to call more than once. */
 	load() {
 		if (typeof localStorage === 'undefined') return;
 		try {
-			const raw = localStorage.getItem(STORAGE_KEY);
-			if (!raw) return; // first run: keep the seed so the legacy note is listed
-			const parsed: unknown = JSON.parse(raw);
-			const notes = Array.isArray(parsed) ? parsed.filter(isNoteMeta) : [];
-			// An empty/corrupt index would strand the user with no note to open.
-			this.notes = notes.length > 0 ? notes : seed();
+			const parsed: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]');
+			this.notes = Array.isArray(parsed) ? parsed.filter(isEntry) : [];
 		} catch {
-			this.notes = seed();
+			this.notes = [];
 		}
 	}
 
-	get(id: string): NoteMeta | undefined {
+	get(id: string): NoteEntry | undefined {
 		return this.notes.find((n) => n.id === id);
 	}
 
-	create(title = 'Untitled note'): NoteMeta {
-		const note = { id: uid(), title, createdAt: Date.now() };
-		this.notes = [...this.notes, note];
-		this.#persist();
-		return note;
+	/** Most recently opened first. */
+	get recent(): NoteEntry[] {
+		return [...this.notes].sort((a, b) => b.openedAt - a.openedAt);
 	}
 
-	/** Add an entry for a note we didn't create — i.e. one opened by id from a
-	 *  URL. The doc may be empty until a peer syncs it to us. */
-	ensure(id: string): NoteMeta {
-		const existing = this.get(id);
-		if (existing) return existing;
-		const note = { id, title: 'Shared note', createdAt: Date.now() };
-		this.notes = [...this.notes, note];
+	/** Record a session from the server — a create, a join, or a renewed token.
+	 *  Keeps an existing owner key / proof unless a new one is given. */
+	save(session: NoteSession & { ownerKey?: string; ownerProof?: string }) {
+		const prev = this.get(session.id);
+		const entry: NoteEntry = {
+			id: session.id,
+			name: session.name,
+			role: session.role,
+			viewAccess: session.viewAccess,
+			token: session.token,
+			ownerKey: session.ownerKey ?? prev?.ownerKey,
+			ownerProof: session.ownerProof ?? prev?.ownerProof,
+			openedAt: Date.now()
+		};
+		this.notes = [...this.notes.filter((n) => n.id !== entry.id), entry];
 		this.#persist();
-		return note;
+		return entry;
 	}
 
-	rename(id: string, title: string) {
-		const clean = title.trim();
-		if (!clean) return;
-		this.notes = this.notes.map((n) => (n.id === id ? { ...n, title: clean } : n));
+	touch(id: string) {
+		this.notes = this.notes.map((n) => (n.id === id ? { ...n, openedAt: Date.now() } : n));
 		this.#persist();
 	}
 
-	/** Forget a note locally. Callers own deleting its stroke data — see
-	 *  noteStore.destroyNoteData(). Refuses to remove the last note. */
-	remove(id: string): boolean {
-		if (this.notes.length <= 1) return false;
-		if (!this.get(id)) return false;
+	/** Forget a note on this device. Callers own deleting its stroke data — see
+	 *  noteStore.destroyNoteData(). */
+	remove(id: string) {
 		this.notes = this.notes.filter((n) => n.id !== id);
 		this.#persist();
-		return true;
 	}
 
 	#persist() {
@@ -93,10 +90,17 @@ class NoteIndex {
 	}
 }
 
-function isNoteMeta(v: unknown): v is NoteMeta {
+function isEntry(v: unknown): v is NoteEntry {
 	if (typeof v !== 'object' || v === null) return false;
 	const n = v as Record<string, unknown>;
-	return typeof n.id === 'string' && typeof n.title === 'string' && typeof n.createdAt === 'number';
+	return (
+		typeof n.id === 'string' &&
+		typeof n.name === 'string' &&
+		(n.role === 'edit' || n.role === 'view') &&
+		typeof n.token === 'string' &&
+		typeof n.viewAccess === 'string' &&
+		typeof n.openedAt === 'number'
+	);
 }
 
 export const noteIndex = new NoteIndex();

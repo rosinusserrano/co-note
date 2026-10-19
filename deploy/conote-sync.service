@@ -1,0 +1,37 @@
+[Unit]
+Description=co-note Yjs relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=conote
+Group=conote
+WorkingDirectory=/opt/conote
+Environment=SYNC_HOST=127.0.0.1
+Environment=SYNC_PORT=5182
+# Registry (hashed passcodes), token secret and saved drawings. systemd creates
+# /var/lib/conote owned by the service user and makes it the one writable path.
+StateDirectory=conote
+StateDirectoryMode=0700
+Environment=CONOTE_DATA=/var/lib/conote
+# A self-contained esbuild bundle (update-server.sh), so /opt/conote needs no
+# node_modules and the service user never runs npm.
+ExecStart=/usr/bin/node /opt/conote/sync.cjs
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

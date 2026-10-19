@@ -1,0 +1,32 @@
+# co-note at conote.sniggles.de. setup-server.sh puts this block (from this
+# comment to the closing brace) into /etc/caddy/Caddyfile. Caddy gets the TLS
+# cert on its own; the PWA needs HTTPS anyway (service worker + install).
+conote.sniggles.de {
+	encode zstd gzip
+
+	# Yjs relay at /sync/<noteId>?token=… and matchmaking for direct (P2P)
+	# links at /sync/signal/<noteId>?token=…; handle_path strips the prefix so
+	# the server sees /<noteId> and /signal/<noteId>, exactly as in dev.
+	handle_path /sync/* {
+		reverse_proxy localhost:5182
+	}
+
+	# Note registry: create, join (passcode → token), owner settings.
+	handle /api/* {
+		reverse_proxy localhost:5182
+	}
+
+	handle {
+		root * /srv/conote-web
+		# Hashed bundles never change; everything else must be re-fetched or a
+		# deploy stays invisible behind the service worker / browser cache.
+		@immutable path /_app/immutable/*
+		header @immutable Cache-Control "public, max-age=31536000, immutable"
+		header @immutable -Last-Modified
+		@mutable not path /_app/immutable/*
+		header @mutable Cache-Control "no-cache"
+		# SPA: adapter-static writes one fallback document for every route.
+		try_files {path} /index.html
+		file_server
+	}
+}

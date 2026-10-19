@@ -1,4 +1,9 @@
 <script lang="ts">
+	import '@fontsource/instrument-serif/400.css';
+	import '@fontsource/instrument-serif/400-italic.css';
+	import '@fontsource-variable/bricolage-grotesque/opsz.css';
+	import '@fontsource/dm-mono/400.css';
+	import '@fontsource/dm-mono/500.css';
 	import '../app.css';
 	import { onMount } from 'svelte';
 	import { pwaInfo } from 'virtual:pwa-info';
