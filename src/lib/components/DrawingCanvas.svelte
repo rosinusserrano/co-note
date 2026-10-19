@@ -94,6 +94,11 @@
 	const FINGER_SETTLE_MS = 250;
 	// Following something: the view eases toward it with this time constant.
 	const TRACK_TAU_MS = 110;
+	// Being pulled to a view (showView): the glide's length grows with how far
+	// it zooms out and back in (in e-folds of zoom), within these bounds.
+	const PULL_MIN_MS = 450;
+	const PULL_MS_PER_EFOLD = 380;
+	const PULL_MAX_MS = 1800;
 
 	let canvas: HTMLCanvasElement;
 	let ctx: CanvasRenderingContext2D | null = null;
@@ -1264,6 +1269,13 @@
 	 * Glide to show all of `view` (a world rect, e.g. another session's screen),
 	 * centred. Waits if a stroke or gesture is under way: moving the view
 	 * under a pen mid-stroke would kink the line.
+	 *
+	 * The camera never slides: the screen's edges first move outward until both
+	 * where we are and where we're going are in sight, then inward onto the
+	 * target. Each half is a zoom about one fixed world point (the first inside
+	 * the current view, the second inside the target), so whatever you were
+	 * looking at stays put while the target comes into view, and the farther
+	 * the jump, the farther out the way there goes.
 	 */
 	export function showView(view: { x: number; y: number; w: number; h: number }) {
 		if (width <= 0 || height <= 0) return;
@@ -1274,28 +1286,57 @@
 		stopGlide();
 		gestureFrom = null;
 		const to = framing({ x0: view.x, y0: view.y, x1: view.x + view.w, y1: view.y + view.h }, width, height);
-		// Ease the screen centre (in world units) and the zoom (geometrically),
-		// so the move reads as one camera motion rather than a zoom plus a slide.
-		const centre = (scale: number, off: { x: number; y: number }) => ({
-			x: (width / 2 - off.x) / scale,
-			y: (height / 2 - off.y) / scale
-		});
-		const s0 = viewport.scale;
-		const c0 = centre(s0, viewport.offset);
-		const c1 = centre(to.scale, to.offset);
+		const from = viewport.visible(width, height);
+		const target = { x: -to.offset.x / to.scale, y: -to.offset.y / to.scale, w: width / to.scale, h: height / to.scale };
+		const over = outerView(from, target);
+		const out = Math.log(over.w / from.w); // zoom out, in e-folds
+		const back = Math.log(over.w / target.w); // zoom in
+		const total = out + back;
+		if (total < 1e-4 && Math.abs(target.x - from.x) * to.scale < 0.5 && Math.abs(target.y - from.y) * to.scale < 0.5) return;
+		const duration = Math.min(PULL_MAX_MS, PULL_MIN_MS + PULL_MS_PER_EFOLD * total);
 		const t0 = performance.now();
-		const DURATION = 420;
 		const step = (t: number) => {
-			const k = Math.min(1, (t - t0) / DURATION);
-			const e = 1 - (1 - k) ** 3;
-			const scale = s0 * (to.scale / s0) ** e;
-			const cx = c0.x + (c1.x - c0.x) * e;
-			const cy = c0.y + (c1.y - c0.y) * e;
-			viewport.scale = scale;
-			viewport.offset = { x: width / 2 - cx * scale, y: height / 2 - cy * scale };
+			const k = Math.min(1, (t - t0) / duration);
+			const e = k < 0.5 ? 4 * k ** 3 : 1 - (-2 * k + 2) ** 3 / 2; // ease in-out cubic
+			// Progress is measured in zoom (log width), so the speed reads evenly
+			// across both halves however unequal they are.
+			const u = e * total;
+			const r = total < 1e-4 ? zoomBetween(from, target, e) : u <= out ? zoomBetween(from, over, out > 0 ? u / out : 1) : zoomBetween(over, target, (u - out) / back);
+			viewport.scale = width / r.w;
+			viewport.offset = { x: -r.x * viewport.scale, y: -r.y * viewport.scale };
 			glide = k < 1 ? requestAnimationFrame(step) : 0;
 		};
 		glide = requestAnimationFrame(step);
+	}
+
+	type Rect = { x: number; y: number; w: number; h: number };
+
+	/** The smallest screen-shaped rect holding both `a` and `b` (centred on their union). */
+	function outerView(a: Rect, b: Rect): Rect {
+		const x0 = Math.min(a.x, b.x);
+		const y0 = Math.min(a.y, b.y);
+		let w = Math.max(a.x + a.w, b.x + b.w) - x0;
+		let h = Math.max(a.y + a.h, b.y + b.h) - y0;
+		const cx = x0 + w / 2;
+		const cy = y0 + h / 2;
+		const aspect = width / height;
+		if (w / h < aspect) w = h * aspect;
+		else h = w / aspect;
+		return { x: cx - w / 2, y: cy - h / 2, w, h };
+	}
+
+	/**
+	 * Fraction `t` of the way from rect `a` to rect `b` (same shape) as one zoom
+	 * about the world point both share on screen: the width changes
+	 * geometrically, and each edge moves only one way. Equal sizes (no such
+	 * point) degrade to a straight slide.
+	 */
+	function zoomBetween(a: Rect, b: Rect, t: number): Rect {
+		const s = b.w / a.w;
+		const f = s ** t;
+		// (1 - f) / (1 - s) → t as s → 1; the fixed point's share of the move.
+		const g = Math.abs(Math.log(s)) < 1e-6 ? t : (1 - f) / (1 - s);
+		return { x: a.x * f + (b.x - s * a.x) * g, y: a.y * f + (b.y - s * a.y) * g, w: a.w * f, h: a.h * f };
 	}
 
 	// --- Following something (the whole drawing, another device's view) ------

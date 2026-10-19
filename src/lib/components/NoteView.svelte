@@ -539,6 +539,18 @@
 				<button class="ibtn" class:on={pop === 'share'} data-pop onclick={() => toggle('share')} title="Share" aria-label="Share">
 					<Icon name="link" />
 				</button>
+				{#if entry.ownerKey}
+					<button
+						class="ibtn"
+						class:on={pullSent}
+						disabled={noteStore.peers <= 1 || noteStore.access !== 'ok'}
+						onclick={pullEveryone}
+						title="Bring everyone here: move everyone else's view to what you see now"
+						aria-label="Bring everyone here"
+					>
+						<Icon name={pullSent ? 'check' : 'gather'} />
+					</button>
+				{/if}
 				<button class="ibtn" onclick={() => setFocus(true)} title="Focus mode (F): only the note, following along" aria-label="Focus mode">
 					<Icon name="focus" />
 				</button>

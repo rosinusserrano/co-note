@@ -80,6 +80,13 @@ chosen device.
   ignored, a finger pans again after the grace time; a palm that landed before
   the pen stops counting; the canvas context menu is blocked; following glides
   over several frames.
+  Pull-glide round (12 checks, two editors): the owner's corner has *Bring
+  everyone here* before focus (disabled alone, absent for other editors); a
+  far, zoomed-in editor zooms out (195% → 20%) and back in to exactly the
+  owner's view (pixel-identical), zoom only falling then rising, ~1.6 s; from
+  inside the target it only zooms out; a half-screen hop dips to 80%. The
+  path's math (endpoints exact, edges monotonic, shape kept) checked
+  separately.
   Design round (21 checks, headless Chrome): chrome fades to 10% and lets the
   pen through mid-stroke and returns after; tool keys, Ctrl+Z / Ctrl+Shift+Z;
   colour pick reaches the pen; a tap outside closes panels; an observer opens
@@ -393,8 +400,13 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   device connecting in that window is pulled too and a later one isn't.
   Receivers act once per `(client, n)` (`#readPulls` → `noteStore.pulled`):
   `NoteView` turns *Follow* off and calls `DrawingCanvas.showView`, which
-  glides (centre + zoom eased together) to fit that rect, and **waits for
-  pen-up** if a stroke or gesture is under way. This is the one time a
+  glides to fit that rect and **waits for pen-up** if a stroke or gesture is
+  under way. The glide **never slides**: the screen's edges move outward until
+  the current view and the target are both in sight (`outerView`), then inward
+  onto the target — each half one zoom about a fixed world point
+  (`zoomBetween`), progress eased in log-zoom, length from `PULL_MIN_MS` +
+  `PULL_MS_PER_EFOLD` × zoom travelled, capped at `PULL_MAX_MS`. A far jump
+  goes far out; a target inside the current view is a plain zoom. This is the one time a
   device's viewport is set from outside — a one-shot jump by the owner; the
   viewport is still never synced, and anyone can move away right after.
   **The relay enforces owner-only:** `stripFields` removes `pull` from every
@@ -558,7 +570,8 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   uppercase, tracked) for labels, numbers and status. Canvas text uses them by
   name too (presence tags mono, page notices serif).
 - **The canvas is full-bleed; the chrome floats** in ink capsules (`.chrome`):
-  masthead + corner in one `.topbar` row (so they can't overlap on phones),
+  masthead + corner in one `.topbar` row (so they can't overlap on phones;
+  the owner's corner also has *Bring everyone here*, next to focus),
   the tool rail on the left edge, zoom/fit/follow bottom-right. **Phones**
   (≤600px wide): the rail becomes a bottom dock (thumb reach, sized to fit
   360px), the zoom bar drops ± and sits above it, and the colour panel opens
