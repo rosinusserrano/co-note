@@ -13,6 +13,7 @@
 	} from '$lib/notes/api';
 	import { noteIndex, myName, setMyName, isOwner, NAME_MAX, type NoteEntry } from '$lib/notes/noteIndex.svelte';
 	import { account } from '$lib/notes/account.svelte';
+	import { appUpdate } from '$lib/appUpdate.svelte';
 	import { destroyNoteData } from '$lib/notes/noteStore.svelte';
 
 	interface Props {
@@ -27,6 +28,16 @@
 
 	// What the account holds joins this device's list (fresh tokens too).
 	onMount(() => void account.sync());
+	// A new version doesn't reload over a half-filled form.
+	onMount(() =>
+		appUpdate.block(
+			() =>
+				joinForm.busy ||
+				createForm.busy ||
+				accountForm.busy ||
+				!!(joinForm.passcode || createForm.name || createForm.editPasscode || createForm.viewPasscode || accountForm.password)
+		)
+	);
 
 	let accountForm = $state({ name: '', password: '', busy: false, error: '' });
 
@@ -171,13 +182,10 @@
 		<div class="pitch">
 			<p class="kicker eyebrow">Nº 01 — a notebook for two screens</p>
 			<h1>
-				Draw together,<br />
-				<em><span class="hl">each at your own</span> zoom.</em>
+				Shared<br />
+				<em><span class="hl">live</span> notes</em>
 			</h1>
-			<p class="lede">
-				One note on every device. Keep the whole page on the laptop you're sharing in the call, while the tablet zooms right
-				in under your pen.
-			</p>
+			<p class="lede"><span>Pen &amp; PDF</span> · <span>in sync on every device</span> · <span>each screen its own zoom</span></p>
 
 			{#if returning}
 				<section class="index">
@@ -366,7 +374,7 @@
 	</section>
 
 	<footer class="kicker">
-		<span>conote</span>
+		<span title="This build">conote · {__BUILD_ID__}</span>
 		<span>Pen · brush · marker · laser · PDF</span>
 		<span>Install it from your browser menu</span>
 	</footer>
@@ -582,6 +590,25 @@
 	}
 	.tabs .kicker {
 		font-size: 0.6rem;
+	}
+	.tabs button {
+		white-space: nowrap;
+	}
+	@media (max-width: 480px) {
+		.tabs {
+			padding-left: 0.75rem;
+		}
+		.tabs button {
+			padding: 0.65rem 0.85rem 0.75rem;
+			font-size: 0.9rem;
+		}
+		.tabs .kicker {
+			display: none;
+		}
+	}
+	/* Fragments wrap at the dots, not inside. */
+	.lede span {
+		white-space: nowrap;
 	}
 	.tabs button.on .kicker {
 		color: var(--lime-deep);

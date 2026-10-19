@@ -5,6 +5,8 @@
 /// <reference types="vite-plugin-pwa/client" />
 
 declare global {
+	/** When this build was made (vite.config.ts). */
+	const __BUILD_ID__: string;
 	namespace App {
 		// interface Error {}
 		// interface Locals {}

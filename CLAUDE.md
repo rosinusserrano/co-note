@@ -117,6 +117,12 @@ chosen device.
   hidden), undo restores; edited and exported again: still one ink stream per
   page; a third note importing that matches pixel for pixel; a plain PDF
   imports as before; pdf.js with default settings (any viewer) shows the ink.
+  Update round (11 checks, two real builds served like Caddy): the version
+  from before this mechanism picks up the new one by itself and runs it; a
+  returning visitor's page finds a new deploy, the worker takes over but
+  the page doesn't reload while the pen is down, reloads once idle, back in
+  the same note at the same zoom and tool, on the new build; a half-typed
+  passcode on the start page holds it back until emptied.
   Accounts round (21 checks, grace cut to 6 s): signed out, the New note
   form warns and the note shows *unsaved*; a signed-in editor joining it
   doesn't save it — it survives inside the grace time and is gone after
@@ -160,9 +166,30 @@ chosen device.
 - **Fonts** self-hosted from `@fontsource` (imported in `+layout.svelte`, so
   they're in the PWA precache and work offline): Instrument Serif, Bricolage
   Grotesque (variable, with optical size), DM Mono.
-- **PWA** via `@vite-pwa/sveltekit` (`generateSW`, `autoUpdate`). The manifest
-  link and service-worker registration are injected client-side in
-  `src/routes/+layout.svelte` (`virtual:pwa-info` / `virtual:pwa-register`).
+- **PWA** via `@vite-pwa/sveltekit` (`generateSW`). The manifest link is
+  injected client-side in `src/routes/+layout.svelte` (`virtual:pwa-info`);
+  the service worker is registered by `src/lib/appUpdate.svelte.ts`
+  (`injectRegister: false`), which keeps installed apps current:
+  - The worker takes over as soon as a new one installs (`skipWaiting` +
+    `clientsClaim`, set by hand in `vite.config.ts` — the plugin only adds
+    them when it injects the registration). Versions from before this
+    module reload on takeover by themselves, so they move over unattended.
+  - It checks for a new version every 2 min while visible, and on
+    return to the front / focus / online (≥ 20 s apart) — iOS home-screen
+    apps otherwise only look at launch.
+  - After a takeover (`controllerchange` once a worker already served the
+    page), the page reloads **at a quiet moment**: nothing touched for 4 s
+    (or the app hidden), nothing focused for typing, and no `block()`er
+    active (NoteView: stroke/laser, PDF/Zotero work, open settings, sign-in
+    or Zotero panel, customising bars; Home: a half-filled form). A notice
+    shows for 1.2 s first; touching anything postpones it.
+  - `beforeReload()` lets NoteView stash note id, zoom/offset, focus, follow
+    (the whole note only) and tool in sessionStorage `conote:resume`
+    (honoured for 2 min), so the reload lands where you were.
+  - The page keeps running old code until then, and old hashed bundles
+    stay on the server 30 days (`publish-web.sh` doesn't delete
+    `_app/immutable/`), so a lazy load (pdf.js, export) never 404s.
+  `__BUILD_ID__` (build time, UTC) shows in the ⋯ menu and the start page.
 - **Sync**: Yjs CRDT — `yjs` + `y-indexeddb` (local-first) + `y-websocket`
   (client) against `server/sync-server.js` (relay + note registry API). `ws`,
   `y-protocols` and `lib0` are server-side imports (never bundled into the client).
@@ -202,7 +229,8 @@ kept; restore steps in `deploy/backup.sh`). The old open matchmaking service
 - `sudo bash deploy/setup-server.sh` — first install, and again whenever
   `deploy/Caddyfile` changes. Re-runnable: it replaces its own Caddy block
   (backup first, restored if Caddy rejects it), then runs the two below.
-- `bash deploy/publish-web.sh` — after client changes (no sudo).
+- `bash deploy/publish-web.sh` — after client changes (no sudo). Keeps old
+  `_app/immutable/` bundles for 30 days (see PWA under Stack).
 - `sudo bash deploy/update-server.sh` — after changes in `server/` or the
   units / `backup.sh` in `deploy/`.
 

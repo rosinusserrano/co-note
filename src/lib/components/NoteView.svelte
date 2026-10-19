@@ -22,6 +22,7 @@
 		type ZoteroPdf
 	} from '$lib/notes/api';
 	import { zotero } from '$lib/notes/zotero.svelte';
+	import { appUpdate } from '$lib/appUpdate.svelte';
 	import { Viewport, MAX_FIT_SCALE } from '$lib/notes/viewport.svelte';
 	import { PAGE_GAP } from '$lib/notes/pages';
 	import { BRUSHES, MARKER_ALPHA } from '$lib/notes/ink';
@@ -217,6 +218,51 @@
 	/** No chrome, no ink, the view following something. Observers start here. */
 	let focus = $state(untrack(() => entry.role !== 'edit'));
 	if (untrack(() => focus)) follow = 'drawing';
+
+	// --- Updates: reload into a new version at a quiet moment, and come back here ---
+
+	const RESUME_KEY = 'conote:resume';
+	type Resume = { id: string; at: number; scale: number; x: number; y: number; focus: boolean; follow: 'drawing' | null; tool: Tool; brush: Brush };
+	(() => {
+		let r: Resume | null = null;
+		try {
+			r = JSON.parse(sessionStorage.getItem(RESUME_KEY) ?? 'null');
+			sessionStorage.removeItem(RESUME_KEY);
+		} catch {
+			/* nothing to resume */
+		}
+		if (!r || r.id !== untrack(() => entry.id) || Date.now() - r.at > 120_000) return;
+		viewport.scale = r.scale;
+		viewport.offset = { x: r.x, y: r.y };
+		focus = r.focus;
+		follow = r.follow;
+		if (TOOLS.some((t) => t.id === r.tool)) tool = r.tool;
+		if (r.brush in inks) brush = r.brush;
+	})();
+	onMount(() => {
+		const unblock = appUpdate.block(
+			() => inking || pdfBusy !== '' || showSettings || customizing || pop === 'keep' || pop === 'zotero'
+		);
+		const unsave = appUpdate.beforeReload(() => {
+			const r: Resume = {
+				id: entry.id,
+				at: Date.now(),
+				scale: viewport.scale,
+				x: viewport.offset.x,
+				y: viewport.offset.y,
+				focus,
+				// A followed device has a new id after the reload; the whole note doesn't.
+				follow: follow === 'drawing' ? 'drawing' : null,
+				tool,
+				brush
+			};
+			sessionStorage.setItem(RESUME_KEY, JSON.stringify(r));
+		});
+		return () => {
+			unblock();
+			unsave();
+		};
+	});
 	/** The little bar at the bottom of focus mode, shown for a while after any movement. */
 	let focusBar = $state(true);
 	let focusBarTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1522,6 +1568,7 @@
 					{#if canEdit}<span>P B M E L H — tools · Ctrl Z — undo</span>{/if}
 					<span>F — focus · 1 — fit · 0 — 100% · ± — zoom</span>
 				</p>
+				<p class="fine kicker build">conote · build {__BUILD_ID__}</p>
 			</div>
 		{/if}
 	{/if}
@@ -2756,6 +2803,10 @@
 		background: var(--lime);
 		padding: 0.15rem 0.45rem;
 		border-radius: 999px;
+	}
+	.build {
+		padding: 0.4rem 0.6rem 0.1rem;
+		color: var(--smoke);
 	}
 	.keys {
 		display: flex;

@@ -3,10 +3,18 @@ import { SvelteKitPWA } from '@vite-pwa/sveltekit';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+	define: {
+		// Which build a device runs (⋯ menu, start page): UTC, to the minute.
+		__BUILD_ID__: JSON.stringify(new Date().toISOString().slice(0, 16).replace('T', ' '))
+	},
 	plugins: [
 		sveltekit(),
 		SvelteKitPWA({
+			// A new service worker takes over at once (skipWaiting + clientsClaim);
+			// the page reloads into it when idle — src/lib/appUpdate.svelte.ts
+			// registers it itself, so nothing is injected.
 			registerType: 'autoUpdate',
+			injectRegister: false,
 			manifest: {
 				name: 'conote',
 				short_name: 'conote',
@@ -28,6 +36,9 @@ export default defineConfig({
 				]
 			},
 			workbox: {
+				// Set by hand: the plugin only adds these when it injects the registration.
+				skipWaiting: true,
+				clientsClaim: true,
 				globPatterns: ['**/*.{js,mjs,css,html,ico,png,svg,woff2}']
 			}
 		})
