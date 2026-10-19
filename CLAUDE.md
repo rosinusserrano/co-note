@@ -84,12 +84,13 @@ chosen device.
   owner's people list, canvas cursor tag (only with others shown) and the
   observer's focus chip and pulled notice use the names; remembered per
   device; without one, `Role · device` as before.
-  Pull-glide round (13 checks, two editors): the owner's corner has *Bring
+  Pull-glide round (14 checks, two editors): the owner's corner has *Bring
   everyone here* before focus (disabled alone, absent for other editors); a
   far, zoomed-in editor zooms out (195% → 20%) and back in to exactly the
   owner's view (pixel-identical), zoom only falling then rising, ~1.6 s; from
   inside the target it only zooms out; a half-screen hop dips to 80%; the
-  zoom slows to ~20% of its peak speed at the widest point. The
+  zoom runs at ~90% of its peak speed near the start and end and ~40% around
+  the turn (never stopping). The
   path's math (endpoints exact, edges monotonic, shape kept) checked
   separately.
   Design round (21 checks, headless Chrome): chrome fades to 10% and lets the
@@ -412,9 +413,10 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   under way. The glide **never slides**: the screen's edges move outward until
   the current view and the target are both in sight (`outerView`), then inward
   onto the target — each half one zoom about a fixed world point
-  (`zoomBetween`). Each half eases in and out on its own (time split by its
-  share of the zoom), so the zoom rests at the widest point instead of
-  reversing at full speed. Length from `PULL_MIN_MS` +
+  (`zoomBetween`). Time is split between the halves by their share of the
+  zoom; the speed is full at the start and end and eases down to
+  `PULL_TURN_SPEED` (35%) at the turn — slower there, never stopped (an
+  in-out ease stopped it; the plain one reversed at full speed). Length from `PULL_MIN_MS` +
   `PULL_MS_PER_EFOLD` × zoom travelled, capped at `PULL_MAX_MS`. A far jump
   goes far out; a target inside the current view is a plain zoom. This is the one time a
   device's viewport is set from outside — a one-shot jump by the owner; the

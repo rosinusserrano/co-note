@@ -99,6 +99,9 @@
 	const PULL_MIN_MS = 500;
 	const PULL_MS_PER_EFOLD = 480;
 	const PULL_MAX_MS = 2300;
+	// …and its speed: full at the start and end, easing down to this fraction
+	// of that at the turn (the widest point), never stopping there.
+	const PULL_TURN_SPEED = 0.35;
 
 	let canvas: HTMLCanvasElement;
 	let ctx: CanvasRenderingContext2D | null = null;
@@ -1295,19 +1298,28 @@
 		if (total < 1e-4 && Math.abs(target.x - from.x) * to.scale < 0.5 && Math.abs(target.y - from.y) * to.scale < 0.5) return;
 		const duration = Math.min(PULL_MAX_MS, PULL_MIN_MS + PULL_MS_PER_EFOLD * total);
 		// Each half gets its share of the time by how much it zooms (log width),
-		// and eases in and out on its own: the zoom comes to rest at the widest
-		// point before turning back, instead of reversing at full speed.
+		// so both run at the same pace. Fast at the start and end, slowing (not
+		// stopping) toward the turn: `slowing` is the progress through a half
+		// whose speed falls smoothly from full to PULL_TURN_SPEED.
 		const split = total < 1e-4 ? 1 : out / total;
-		const ease = (k: number) => (1 - Math.cos(Math.PI * k)) / 2;
+		const q = PULL_TURN_SPEED;
+		const slowing = (x: number) => (q * x + ((1 - q) * (x + Math.sin(Math.PI * x) / Math.PI)) / 2) / ((1 + q) / 2);
+		const speeding = (x: number) => 1 - slowing(1 - x);
+		// A move with no turn (one half only) slows in its middle instead.
+		const whole = (k: number) => (k < 0.5 ? slowing(2 * k) / 2 : 1 - slowing(2 - 2 * k) / 2);
 		const t0 = performance.now();
 		const step = (t: number) => {
 			const k = Math.min(1, (t - t0) / duration);
 			const r =
 				total < 1e-4
-					? zoomBetween(from, target, ease(k))
-					: k < split
-						? zoomBetween(from, over, ease(k / split))
-						: zoomBetween(over, target, split < 1 ? ease((k - split) / (1 - split)) : 1);
+					? zoomBetween(from, target, whole(k))
+					: split >= 1
+						? zoomBetween(from, over, whole(k))
+						: split <= 0
+							? zoomBetween(over, target, whole(k))
+							: k < split
+								? zoomBetween(from, over, slowing(k / split))
+								: zoomBetween(over, target, speeding((k - split) / (1 - split)));
 			viewport.scale = width / r.w;
 			viewport.offset = { x: -r.x * viewport.scale, y: -r.y * viewport.scale };
 			glide = k < 1 ? requestAnimationFrame(step) : 0;
