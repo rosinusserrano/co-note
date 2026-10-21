@@ -180,6 +180,8 @@ export const login = (name: string, password: string) => post<AccountSession>('/
 export const accountNotes = () => post<{ notes: (NoteSession & { ownerProof?: string; at?: number })[] }>('/account/notes', {});
 
 export const forgetInAccount = (id: string) => post<{ ok: true }>('/account/forget', { id });
+export const getVault = () => post<{ vault: string | null }>('/account/vault', {});
+export const setVault = (vault: string) => post<{ ok: true }>('/account/vault/set', { vault });
 
 /** Keep a note this device owns (by key) in the account. */
 export const claimNote = (id: string, ownerKey?: string) => post<OwnerSession>('/account/claim', { id, ownerKey });

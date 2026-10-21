@@ -3,7 +3,7 @@
 // editable. It comes from a file, so everything in it is checked.
 
 import { BRUSHES } from './ink';
-import type { Brush, PageLayout, Stroke } from './model';
+import type { Brush, PageLayout, Stroke, TextBox } from './model';
 
 export const CONOTE_FILE = 'conote.json';
 /** The optional-content layer the drawn ink sits in; conote hides it. */
@@ -16,10 +16,14 @@ export interface ConoteData {
 	pages: { extra: boolean }[];
 	/** Page-local strokes; `page` is the PDF page index. */
 	strokes: (Omit<Stroke, 'id' | 'page'> & { page: number })[];
+	/** Page-local text boxes, the same way (absent in older exports). */
+	texts: (Omit<TextBox, 'id' | 'page'> & { page: number })[];
 }
 
 const MAX_STROKES = 200_000;
 const MAX_POINTS = 20_000;
+const MAX_TEXTS = 20_000;
+const MAX_TEXT = 20_000;
 const num = (v: unknown, lo: number, hi: number): v is number => typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi;
 
 /** The data, if `json` is conote data for a PDF of `pageCount` pages; else null. */
@@ -52,10 +56,21 @@ export function readConoteData(json: unknown, pageCount: number): ConoteData | n
 			...(num(s.z, 0.001, 1000) ? { z: s.z } : {})
 		});
 	}
+	const texts: ConoteData['texts'] = [];
+	for (const raw of Array.isArray(d.texts) ? d.texts.slice(0, MAX_TEXTS) : []) {
+		const t = raw as Record<string, unknown>;
+		if (!t || typeof t !== 'object') continue;
+		if (typeof t.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(t.color)) continue;
+		if (typeof t.text !== 'string' || !t.text.trim() || t.text.length > MAX_TEXT) continue;
+		if (!num(t.size, 0.5, 1000) || !num(t.x, -1e6, 1e6) || !num(t.y, -1e6, 1e6)) continue;
+		if (!Number.isInteger(t.page) || !num(t.page, 0, pageCount - 1)) continue;
+		texts.push({ x: t.x, y: t.y, text: t.text, size: t.size, color: t.color, page: t.page as number });
+	}
 	return {
 		v: 1,
 		layout: d.layout === 'horizontal' ? 'horizontal' : 'vertical',
 		pages: d.pages.map((p) => ({ extra: !!(p as { extra?: unknown })?.extra })),
-		strokes
+		strokes,
+		texts
 	};
 }

@@ -1,20 +1,24 @@
 <script lang="ts">
+	import { flushSync, untrack } from 'svelte';
 	import { noteStore, type Presence } from '$lib/notes/noteStore.svelte';
-	import { uid, type Stroke, type StrokePoint } from '$lib/notes/model';
+	import { uid, type Stroke, type StrokePoint, type TextBox } from '$lib/notes/model';
+	import { TEXT_ASCENT, TEXT_FONT, TEXT_LINE, remeasureText, textBounds, textLines } from '$lib/notes/text';
 	import { framing, type Box, type Viewport } from '$lib/notes/viewport.svelte';
 	import { inkShape, liveInkShape, isMarker, strokeZoom, MARKER_ALPHA, type InkShape } from '$lib/notes/ink';
 	import type { Brush } from '$lib/notes/model';
 	import { pageAt, PAGE_GAP, type PlacedPage } from '$lib/notes/pages';
-	import type { PageRenderer } from '$lib/notes/pdf';
+	import type { PageRenderer, PdfLink } from '$lib/notes/pdf';
 
 	interface Props {
 		viewport: Viewport;
 		/** 'draw' allows pen/mouse to ink; 'observe' is view-only (still pans/zooms). */
 		mode?: 'draw' | 'observe';
 		/** Active tool for pen/mouse input: a brush, the eraser, the laser
-		 *  pointer, or the hand (drags the view around). */
-		tool?: Brush | 'eraser' | 'laser' | 'hand';
+		 *  pointer, the hand (drags the view around), or text (a tap places or
+		 *  edits a text box). */
+		tool?: Brush | 'eraser' | 'laser' | 'hand' | 'text';
 		color?: string;
+		/** A brush's width; with the text tool, the font size. */
 		strokeWidth?: number;
 		/** Draw other sessions' cursors and visible areas. */
 		showPresence?: boolean;
@@ -274,6 +278,33 @@
 				if (mine.length > 0) onPage(layer, page, () => mine.forEach((s) => drawShape(layer, s.color, inkShape(s))));
 			}
 		}
+		// Text on top of the ink; the one being edited is the editor's to show.
+		const hidden = editing?.id;
+		for (const t of noteStore.texts) {
+			if (t.id === hidden) continue;
+			if (!t.page) drawText(c, t);
+			else {
+				const page = pages.get(t.page);
+				if (page) onPage(c, page, () => drawText(c, t));
+			}
+		}
+	}
+
+	/** A text box in the current transform. Drawn at 100px and scaled, since
+	 *  tiny world sizes render badly as font sizes. */
+	function drawText(c: CanvasRenderingContext2D, t: TextBox) {
+		const k = t.size / 100;
+		c.fillStyle = t.color;
+		c.font = `100px ${TEXT_FONT}`;
+		c.textBaseline = 'alphabetic';
+		textLines(t).forEach((line, i) => {
+			if (!line) return;
+			c.save();
+			c.translate(t.x, t.y + t.size * (TEXT_ASCENT + i * TEXT_LINE));
+			c.scale(k, k);
+			c.fillText(line, 0, 0);
+			c.restore();
+		});
 	}
 
 	let gridTile: HTMLCanvasElement | null = null;
@@ -633,6 +664,179 @@
 		};
 	});
 
+	// --- Links in PDFs: where a citation leads, shown on hover ----------------
+
+	/** The link's destination, cropped, shown next to the pointer. */
+	let cite = $state<{ x: number; y: number; canvas: HTMLCanvasElement; w: number; h: number; css: number } | null>(null);
+	let citeHost = $state<HTMLDivElement | null>(null);
+	let hovered: PdfLink | null = null;
+	let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+	let tapFrom: { x: number; y: number } | null = null;
+	const HOVER_MS = 280;
+
+	/** The link under a screen point, with its page. */
+	function linkAt(at: { x: number; y: number }) {
+		if (!renderer) return null;
+		const w = viewport.toWorld(at.x, at.y);
+		const page = pageAt(noteStore.pages, w.x, w.y);
+		if (!page?.pdf) return null;
+		const lx = w.x - page.x;
+		const ly = w.y - page.y;
+		const pad = 2 / viewport.scale;
+		const link = renderer.links(page)?.find((l) => lx >= l.x - pad && lx <= l.x + l.w + pad && ly >= l.y - pad && ly <= l.y + l.h + pad);
+		return link ? { link, file: page.pdf.file } : null;
+	}
+
+	/** A pointer hovering at `at` (null: gone): after a moment on a link, its preview. */
+	function hoverLink(at: { x: number; y: number } | null) {
+		const hit = at && !inking() ? linkAt(at) : null;
+		if (hit?.link === hovered) {
+			if (cite && at) cite = { ...cite, x: at.x, y: at.y };
+			return;
+		}
+		hovered = hit?.link ?? null;
+		cite = null;
+		if (hoverTimer) clearTimeout(hoverTimer);
+		hoverTimer = null;
+		if (hit && at) hoverTimer = setTimeout(() => void showCite(hit, at), HOVER_MS);
+	}
+
+	async function showCite(hit: { link: PdfLink; file: string }, at: { x: number; y: number }) {
+		// As big as the page at this zoom (at least 100%, at most 200%), within the screen.
+		const css = Math.min(2, Math.max(1, viewport.scale));
+		const shown = await renderer?.preview(hit.file, hit.link.dest, css, Math.min(640, width - 16), dpr);
+		if (!shown || hovered !== hit.link) return;
+		cite = { x: at.x, y: at.y, ...shown };
+	}
+
+	/** Fingers don't hover: a tap on a link (moving the view, not inking) shows it. */
+	function tapLink(e: PointerEvent) {
+		const at = local(e);
+		if (!tapFrom || Math.hypot(at.x - tapFrom.x, at.y - tapFrom.y) > 6) return;
+		const hit = linkAt(at);
+		if (!hit) return;
+		hovered = hit.link;
+		void showCite(hit, at);
+	}
+
+	$effect(() => {
+		if (!citeHost || !cite) return;
+		citeHost.replaceChildren(cite.canvas);
+	});
+	// A move of the view puts the link elsewhere.
+	$effect(() => {
+		void viewport.scale;
+		void viewport.offset;
+		untrack(() => {
+			if (!cite) return;
+			cite = null;
+			hovered = null;
+		});
+	});
+	/** Where the preview goes: below the pointer, or above when there's no room. */
+	const citePos = $derived.by(() => {
+		if (!cite) return null;
+		const w = cite.w * cite.css;
+		const h = cite.h * cite.css;
+		const left = Math.max(8, Math.min(cite.x - 24, width - w - 8));
+		const top = cite.y + 22 + h + 8 < height ? cite.y + 22 : Math.max(8, cite.y - 14 - h);
+		return { left, top, w, h };
+	});
+
+	// --- Text boxes ----------------------------------------------------------
+
+	/** The text box being typed: a new one (`id` null) or a copy of one being
+	 *  edited (hidden on the canvas meanwhile). Coordinates are local to `page`. */
+	let editing = $state<{ id: string | null; page: PlacedPage | null; x: number; y: number; size: number; color: string; text: string } | null>(null);
+	let editor = $state<HTMLTextAreaElement | null>(null);
+
+	/** Text boxes within `radius` (world units) of a world point, topmost first. */
+	function textsAt(wx: number, wy: number, radius: number) {
+		const pages = new Map(noteStore.pages.map((p) => [p.id, p]));
+		const out: { t: TextBox; page: PlacedPage | null }[] = [];
+		for (const t of noteStore.texts) {
+			const page = t.page ? pages.get(t.page) : null;
+			if (page === undefined) continue; // on a deleted page
+			const b = textBounds(t);
+			const x = wx - (page?.x ?? 0);
+			const y = wy - (page?.y ?? 0);
+			if (x >= b.x - radius && x <= b.x + b.w + radius && y >= b.y - radius && y <= b.y + b.h + radius) out.unshift({ t, page });
+		}
+		return out;
+	}
+
+	/** A tap with the text tool: edit the text box there, or start a new one. */
+	function startText(e: PointerEvent) {
+		commitText();
+		const at = local(e);
+		const w = viewport.toWorld(at.x, at.y);
+		const [hit] = textsAt(w.x, w.y, 4 / viewport.scale);
+		if (hit) {
+			const { t, page } = hit;
+			editing = { id: t.id, page, x: t.x, y: t.y, size: t.size, color: t.color, text: t.text };
+		} else {
+			const page = pageAt(noteStore.pages, w.x, w.y) ?? null;
+			const size = strokeWidth;
+			// The tap lands in the middle of the first line.
+			editing = { id: null, page, x: w.x - (page?.x ?? 0), y: w.y - (page?.y ?? 0) - (size * TEXT_LINE) / 2, size, color, text: '' };
+		}
+		// Rendered and focused now, inside the tap: phones only open the
+		// keyboard for a focus the user's gesture made.
+		flushSync();
+		editor?.focus();
+		baseDirty = true;
+		markDirty();
+	}
+
+	/** Store the text being typed (an emptied box is removed) and close the editor. */
+	function commitText() {
+		const ed = editing;
+		if (!ed) return;
+		editing = null;
+		baseDirty = true;
+		markDirty();
+		const text = ed.text.replace(/\s+$/, '');
+		const old = ed.id ? noteStore.texts.find((t) => t.id === ed.id) : null;
+		if (old && old.text === text && old.size === ed.size && old.color === ed.color) return; // untouched
+		if (!old && !text.trim()) return;
+		const box: TextBox | null = text.trim()
+			? { id: uid(), x: ed.x, y: ed.y, text, size: ed.size, color: ed.color, ...(ed.page ? { page: ed.page.id } : {}) }
+			: null;
+		noteStore.setText(ed.id, box);
+	}
+
+	/** Leaving the editor stores the text — unless the focus went to the ink
+	 *  panel, whose colour and size then restyle the box being edited. */
+	function onEditorBlur(e: FocusEvent) {
+		const to = e.relatedTarget as HTMLElement | null;
+		if (to?.closest('[data-pop]')) return;
+		commitText();
+	}
+	$effect(() => {
+		const c = color;
+		const size = strokeWidth;
+		untrack(() => {
+			if (editing && tool === 'text') {
+				editing.color = c;
+				editing.size = size;
+			}
+		});
+	});
+	// Another tool, or a session that can't draw: the text is done.
+	$effect(() => {
+		if (tool !== 'text' || mode !== 'draw') untrack(commitText);
+	});
+	$effect(() => () => untrack(commitText));
+
+	// Text is measured in Arimo; until it has loaded, widths are a fallback font's.
+	$effect(() => {
+		void document.fonts?.load(`100px ${TEXT_FONT}`).then(() => {
+			remeasureText();
+			baseDirty = true;
+			markDirty();
+		});
+	});
+
 	// --- Pages -------------------------------------------------------------
 
 	// pdf.js is loaded only once the note has PDF pages, and torn down with it.
@@ -669,7 +873,7 @@
 	});
 
 	function deletePage(p: PlacedPage) {
-		const inked = noteStore.strokes.some((s) => s.page === p.id);
+		const inked = noteStore.strokes.some((s) => s.page === p.id) || noteStore.texts.some((t) => t.page === p.id);
 		if ((inked || p.pdf) && !confirm(`Delete page ${p.n}${inked ? ' and the ink on it' : ''}? Undo brings it back.`)) return;
 		noteStore.deletePage(p.id);
 	}
@@ -809,6 +1013,7 @@
 			}
 			if (strokeHit(s, w.x - ox, w.y - oy, radius + s.width / 2)) hits.add(s.id);
 		}
+		for (const hit of textsAt(w.x, w.y, radius)) hits.add(hit.t.id);
 		if (hits.size === 0) return;
 		if (!eraseStarted) {
 			noteStore.beginChange(); // one history step per erase gesture
@@ -893,6 +1098,8 @@
 
 	function onPointerDown(e: PointerEvent) {
 		measure(); // the canvas can move (banners above it) without resizing
+		tapFrom = local(e);
+		hoverLink(null);
 		if (e.pointerType === 'pen') sawPen();
 		const finger = e.pointerType === 'touch';
 		if (finger) {
@@ -933,6 +1140,12 @@
 			return;
 		}
 		if (!contact) return;
+		if (use.tool === 'text') {
+			// No compatibility mousedown: its default would take the focus
+			// straight back from the editor.
+			e.preventDefault();
+			return startText(e);
+		}
 		canvas.setPointerCapture(e.pointerId);
 		// The pen wins over whatever the hand started a moment ago.
 		if (touches.size > 0) {
@@ -1014,6 +1227,7 @@
 		// Pen/mouse, drawing or hovering: that's our cursor for the others
 		// (while drawing it rides along with the live stroke instead).
 		const here = local(e);
+		if (e.buttons === 0) hoverLink(here);
 		if (e.pointerId !== drawingPointerId) publishCursor(viewport.toWorld(here.x, here.y));
 		if (e.pointerId === panPointerId && panLast) {
 			viewport.panBy(here.x - panLast.x, here.y - panLast.y);
@@ -1063,6 +1277,7 @@
 		}
 		if (e.pointerType === 'touch' && !inkPointer(e.pointerId)) {
 			if (!touches.delete(e.pointerId)) return; // a palm, or dropped for the pen
+			if (touches.size === 0 && !pinched) tapLink(e);
 			pinchPrev = null;
 			if (touches.size === 1) primeTouchPan();
 			if (touches.size === 0) {
@@ -1074,6 +1289,7 @@
 			return;
 		}
 		if (e.pointerId === panPointerId) {
+			tapLink(e);
 			panPointerId = null;
 			panLast = null;
 			panning = false;
@@ -1117,6 +1333,7 @@
 
 	function onPointerLeave(e: PointerEvent) {
 		if (e.pointerType !== 'touch' && e.pointerId !== drawingPointerId) publishCursor(null);
+		hoverLink(null);
 	}
 
 	// One-finger pan
@@ -1160,7 +1377,8 @@
 	}
 
 	/** Wheel scrolls like any page (Shift: sideways); Ctrl+wheel zooms at the
-	 *  cursor — which is also what a trackpad pinch sends. */
+	 *  cursor — which is also what a trackpad pinch sends. With the hand tool
+	 *  the plain wheel zooms too: the hand already moves the view by dragging. */
 	function onWheel(e: WheelEvent) {
 		e.preventDefault(); // or Ctrl+wheel zooms the whole browser page
 		if (inking()) return; // the view holds still under a stroke
@@ -1170,7 +1388,7 @@
 		const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? height : 1;
 		let dx = e.deltaX * unit;
 		let dy = e.deltaY * unit;
-		if (e.ctrlKey) {
+		if (e.ctrlKey || (tool === 'hand' && !e.shiftKey)) {
 			const at = local(e);
 			// A mouse notch is ~100, a pinch step a few: clamp so a notch is a step.
 			viewport.zoomAt(at.x, at.y, Math.exp(-Math.max(-25, Math.min(25, dy)) * 0.01));
@@ -1460,6 +1678,43 @@
 		oncontextmenu={(e) => e.preventDefault()}
 		data-cursor={panning ? 'grabbing' : tool === 'hand' || spaceHeld || mode !== 'draw' ? 'grab' : tool}
 	></canvas>
+	{#if cite && citePos}
+		<div
+			class="cite"
+			bind:this={citeHost}
+			style:left="{citePos.left}px"
+			style:top="{citePos.top}px"
+			style:width="{citePos.w}px"
+			style:height="{citePos.h}px"
+		></div>
+	{/if}
+	{#if editing}
+		{@const ed = editing}
+		{@const at = viewport.toScreen(ed.x + (ed.page?.x ?? 0), ed.y + (ed.page?.y ?? 0))}
+		{@const box = textBounds({ id: '', x: 0, y: 0, text: ed.text || ' ', size: ed.size, color: ed.color })}
+		<textarea
+			class="texted"
+			bind:this={editor}
+			bind:value={ed.text}
+			style:left="{at.x}px"
+			style:top="{at.y}px"
+			style:color={ed.color}
+			style:font-size="{ed.size * viewport.scale}px"
+			style:width="{(box.w + ed.size) * viewport.scale}px"
+			style:height="{box.h * viewport.scale}px"
+			style:font-family={TEXT_FONT}
+			style:line-height={TEXT_LINE}
+			spellcheck="false"
+			aria-label="Text"
+			onblur={onEditorBlur}
+			onkeydown={(e) => {
+				if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) {
+					e.preventDefault();
+					commitText();
+				}
+			}}
+		></textarea>
+	{/if}
 	<div class="pills">
 		{#each pills as { page, at } (page.id)}
 			<div class="pill" style:left="{at.x}px" style:top="{at.y - PILL_HEIGHT - 3}px">
@@ -1502,6 +1757,42 @@
 	}
 	canvas[data-cursor='grabbing'] {
 		cursor: grabbing;
+	}
+	canvas[data-cursor='text'] {
+		cursor: text;
+	}
+	/* Where a link in a PDF leads (a reference entry, say), next to the pointer. */
+	.cite {
+		position: absolute;
+		z-index: 2;
+		pointer-events: none;
+		background: #fff;
+		border-radius: 8px;
+		overflow: hidden;
+		box-shadow:
+			0 10px 30px rgb(25 24 20 / 0.22),
+			0 0 0 1px rgb(25 24 20 / 0.12);
+	}
+	.cite :global(canvas) {
+		display: block;
+		width: 100%;
+		height: 100%;
+	}
+
+	/* The text box being typed, over the canvas where it will be drawn. */
+	.texted {
+		position: absolute;
+		margin: 0;
+		padding: 0;
+		border: none;
+		outline: 1.5px dashed rgb(25 24 20 / 0.45);
+		outline-offset: 3px;
+		border-radius: 2px;
+		background: transparent;
+		resize: none;
+		overflow: hidden;
+		white-space: pre;
+		min-width: 1em;
 	}
 
 	.pills {

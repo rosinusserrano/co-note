@@ -89,6 +89,43 @@ the owner make everyone *follow* (not just a one-shot pull).
   (~480 tries/day). Raising the minimum is a UX call.
 - **Off-machine backups.** The daily tarballs (`deploy/backup.sh`) stay on the VPS.
 
+### Later: sharing without internet
+
+Wanted: laptop and tablet keep sharing a note where there's no internet (a
+lecture hall, a train). Today every device needs the note server: it mints
+tokens, introduces devices for the direct links, and relays.
+
+**Bluetooth — not possible from the web app.** Web Bluetooth can only talk *to*
+accessories (heart-rate straps, printers); a browser can't act as one, so two
+browsers can't connect to each other over it. Safari (iPad, iPhone) has no Web
+Bluetooth at all. It would take a native app: the Android APK is a Trusted Web
+Activity (Chrome showing the site), which can't reach Bluetooth either, so it
+would mean a WebView shell (e.g. Capacitor) with a Bluetooth plugin carrying
+Yjs updates — and iPads would still need their own native app. Large; parked
+unless the hotspot route below falls short.
+
+**Same Wi-Fi or phone hotspot, introduced by QR code — feasible.** WebRTC
+works between devices on one local network without internet; what's missing
+is the introduction the server does today. Sketch:
+
+1. The device that has the note (it's local already, y-indexeddb) offers it:
+   it becomes the hub and shows a QR code holding its WebRTC offer (SDP,
+   compressed — a few hundred bytes) plus a one-time secret and the role it
+   grants (edit / watch).
+2. The joining device scans it and shows its answer as a QR code; the hub
+   scans that back (two scans — or one, if the joiner's answer can travel
+   another way). The data channel opens; from there it's today's `p2p.ts`
+   protocol and the same star (the hub drops observers' writes).
+3. When internet returns, the server relay reconnects and Yjs merges whatever
+   was drawn offline, as it already does after a dropped connection.
+
+Open questions: roles without the server — the hub decides from the QR secret,
+so whoever scans the code gets that role; joining a note the device has never
+opened (it needs the note's PDFs too, sent over the channel); Chrome hides
+local addresses behind mDNS names, which some hotspots don't resolve; some
+Android hotspots isolate their clients from each other; QR scanning needs
+camera permission (and a fallback: copy/paste the code).
+
 ## Earlier: the P2P broadcast path (v1, removed — superseded by direct links)
 
 Broadcast/join over a WebRTC **star** was built and verified end-to-end

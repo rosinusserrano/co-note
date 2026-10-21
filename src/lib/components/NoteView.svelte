@@ -4,6 +4,7 @@
 	import DrawingCanvas from './DrawingCanvas.svelte';
 	import NoteSettings from './NoteSettings.svelte';
 	import Icon, { type IconName } from './Icon.svelte';
+	import ZoteroConnect from './ZoteroConnect.svelte';
 	import { noteStore, destroyNoteData } from '$lib/notes/noteStore.svelte';
 	import { noteIndex, myName, isOwner, type NoteEntry } from '$lib/notes/noteIndex.svelte';
 	import { account } from '$lib/notes/account.svelte';
@@ -26,6 +27,7 @@
 	import { Viewport, MAX_FIT_SCALE } from '$lib/notes/viewport.svelte';
 	import { PAGE_GAP } from '$lib/notes/pages';
 	import { BRUSHES, MARKER_ALPHA } from '$lib/notes/ink';
+	import { TEXT_FONT, TEXT_SIZE } from '$lib/notes/text';
 	import type { Brush } from '$lib/notes/model';
 	import {
 		Bars,
@@ -52,32 +54,93 @@
 
 	// White last: on white paper it's for covering things up on a PDF page.
 	const palette = ['#191814', '#6b665c', '#e5484d', '#f07a2b', '#f2c230', '#2f9e5b', '#2f6fed', '#7c5cff', '#ffffff'];
-	// Each ink type keeps its own colour and size; the palette and slider edit
-	// the current one (the last one used, while the eraser, laser or hand is active).
-	let inks = $state<Record<Brush, { color: string; width: number }>>({
+	// Each ink type (the brushes, and text) keeps its own colour and size; the
+	// palette and slider edit the current one (the last one used, while the
+	// eraser, laser or hand is active). For text the size is the font size.
+	type Ink = Brush | 'text';
+	const INKS: Record<Ink, { label: string; size: number; min: number; max: number }> = {
+		...BRUSHES,
+		text: { label: 'Text', ...TEXT_SIZE }
+	};
+	let inks = $state<Record<Ink, { color: string; width: number }>>({
 		pen: { color: '#191814', width: BRUSHES.pen.size },
 		brush: { color: '#191814', width: BRUSHES.brush.size },
-		marker: { color: '#f2c230', width: BRUSHES.marker.size }
+		marker: { color: '#f2c230', width: BRUSHES.marker.size },
+		text: { color: '#191814', width: TEXT_SIZE.size }
 	});
-	let brush = $state<Brush>('pen');
+	/** The current ink type. */
+	let brush = $state<Ink>('pen');
 	const color = $derived(inks[brush].color);
 	const strokeWidth = $derived(inks[brush].width);
 
-	type Tool = Brush | 'eraser' | 'laser' | 'hand';
+	type Tool = Ink | 'eraser' | 'laser' | 'hand';
 	const TOOLS: { id: Tool; icon: IconName; label: string; key: string; hint?: string }[] = [
 		{ id: 'pen', icon: 'pen', label: 'Pen', key: 'P' },
 		{ id: 'brush', icon: 'brush', label: 'Brush', key: 'B' },
 		{ id: 'marker', icon: 'marker', label: 'Marker', key: 'M' },
+		{ id: 'text', icon: 'text', label: 'Text', key: 'T', hint: 'tap to type, tap a text to change it' },
 		{ id: 'eraser', icon: 'eraser', label: 'Eraser', key: 'E' },
 		{ id: 'laser', icon: 'laser', label: 'Laser', key: 'L', hint: 'hold to point, everyone sees a fading trail' },
 		{ id: 'hand', icon: 'hand', label: 'Hand', key: 'H', hint: 'drag to move around (or hold Space)' }
 	];
 
+	// Saved inks: a brush with its colour and size, one tap away (per device).
+	const PRESETS_KEY = 'conote:presets';
+	const MAX_PRESETS = 6;
+	type Preset = { brush: Ink; color: string; width: number };
+	const validPreset = (p: unknown): p is Preset => {
+		const q = p as Preset;
+		return (
+			!!q &&
+			typeof q === 'object' &&
+			Object.hasOwn(INKS, q.brush) &&
+			typeof q.color === 'string' &&
+			/^#[0-9a-f]{6}$/i.test(q.color) &&
+			typeof q.width === 'number' &&
+			q.width >= INKS[q.brush].min &&
+			q.width <= INKS[q.brush].max
+		);
+	};
+	let presets = $state<Preset[]>(
+		(() => {
+			try {
+				const v = JSON.parse(localStorage.getItem(PRESETS_KEY) ?? '[]');
+				return Array.isArray(v) ? v.filter(validPreset).slice(0, MAX_PRESETS) : [];
+			} catch {
+				return [];
+			}
+		})()
+	);
+	const isCurrent = (p: Preset) => isBrush(tool) && p.brush === brush && p.color === color && p.width === strokeWidth;
+	const presetSaved = $derived(presets.some((p) => p.brush === brush && p.color === color && p.width === strokeWidth));
+	function savePresets() {
+		writeLocal(PRESETS_KEY, JSON.stringify(presets));
+	}
+	function addPreset() {
+		if (presetSaved || presets.length >= MAX_PRESETS) return;
+		presets.push({ brush, color, width: strokeWidth });
+		savePresets();
+	}
+	function removePreset(i: number) {
+		presets.splice(i, 1);
+		savePresets();
+	}
+	function usePreset(p: Preset) {
+		inks[p.brush] = { color: p.color, width: p.width };
+		pickTool(p.brush);
+	}
+	/** A preset's icon grows with its thickness, within its brush's range. */
+	const presetSize = (p: Preset) => {
+		const b = INKS[p.brush];
+		return Math.round(12 + (10 * (p.width - b.min)) / (b.max - b.min));
+	};
+
 	function pickColor(c: string) {
 		inks[brush].color = c;
 		if (!isBrush(tool)) tool = brush; // picking a colour means "draw with it"
 	}
-	const isBrush = (t: Tool): t is Brush => t === 'pen' || t === 'brush' || t === 'marker';
+	/** A tool that puts something down in the current ink. */
+	const isBrush = (t: Tool): t is Ink => t === 'pen' || t === 'brush' || t === 'marker' || t === 'text';
 	function pickTool(t: Tool) {
 		if (isBrush(t)) brush = t;
 		tool = t;
@@ -222,7 +285,7 @@
 	// --- Updates: reload into a new version at a quiet moment, and come back here ---
 
 	const RESUME_KEY = 'conote:resume';
-	type Resume = { id: string; at: number; scale: number; x: number; y: number; focus: boolean; follow: 'drawing' | null; tool: Tool; brush: Brush };
+	type Resume = { id: string; at: number; scale: number; x: number; y: number; focus: boolean; follow: 'drawing' | null; tool: Tool; brush: Ink };
 	(() => {
 		let r: Resume | null = null;
 		try {
@@ -471,10 +534,8 @@
 
 	// --- Zotero: papers in, annotated PDFs back out -------------------------------
 
-	zotero.load();
 	/** Setting up (or changing) the connection, rather than searching. */
 	let zoteroSetup = $state(!zotero.settings);
-	let zoteroForm = $state({ apiKey: '', storage: 'zotero' as 'zotero' | 'webdav', url: '', user: '', password: '', busy: false, error: '' });
 	let zoteroQuery = $state('');
 	let zoteroItems = $state<ZoteroItem[] | null>(null);
 	/** An item opened to pick one of its several PDFs. */
@@ -483,42 +544,16 @@
 	let zoteroDone = $state('');
 	let zoteroSearchTimer: ReturnType<typeof setTimeout> | undefined;
 
-	function openZotero(e: MouseEvent) {
+	async function openZotero(e: MouseEvent) {
 		zoteroSetup = !zotero.settings;
 		zoteroError = '';
 		toggle('zotero', e);
-		if (zotero.settings && account.signedIn && !zoteroItems) void findInZotero();
-	}
-
-	async function connectZotero(e: SubmitEvent) {
-		e.preventDefault();
-		const f = zoteroForm;
-		f.busy = true;
-		f.error = '';
-		try {
-			const key = f.apiKey.trim() || zotero.settings?.apiKey || '';
-			const who = await zoteroVerify(key);
-			if (!who.write) throw new Error('That key can only read. Give it write access too, so annotated PDFs can be saved back.');
-			const webdav = f.storage === 'webdav' ? { url: f.url.trim(), user: f.user.trim(), password: f.password } : undefined;
-			zotero.save({ apiKey: key, userId: who.userId, username: who.username, webdav });
-			f.apiKey = '';
-			f.password = '';
-			zoteroSetup = false;
-			zoteroItems = null;
-			await findInZotero();
-		} catch (err) {
-			f.error = err instanceof Error ? err.message : 'Something went wrong.';
-		} finally {
-			f.busy = false;
+		// Set up on another device: the account has it.
+		if (!zotero.settings && account.vaultKey) {
+			await account.pullVault();
+			zoteroSetup = !zotero.settings;
 		}
-	}
-
-	function editZotero() {
-		const z = zotero.settings;
-		zoteroForm.storage = z?.webdav ? 'webdav' : 'zotero';
-		zoteroForm.url = z?.webdav?.url ?? '';
-		zoteroForm.user = z?.webdav?.user ?? '';
-		zoteroSetup = true;
+		if (zotero.settings && account.signedIn && !zoteroItems) void findInZotero();
 	}
 
 	async function findInZotero() {
@@ -1111,11 +1146,24 @@
 				class:on={pop === 'ink'}
 				data-pop
 				onclick={(e) => toggle('ink', e)}
-				title={`${BRUSHES[brush].label}: colour and size`}
-				aria-label={`${BRUSHES[brush].label} colour and size`}
+				title={`${INKS[brush].label}: colour and size`}
+				aria-label={`${INKS[brush].label} colour and size`}
 			>
 				<span class="dish"><span class="blob" style:background={color} style:--w="{Math.min(20, 4 + strokeWidth * 0.55)}px"></span></span>
 			</button>
+			{#if presets.length && bars.profile === 'wide'}
+				{#each presets as p, i (i)}
+					<button
+						class="preset"
+						class:on={isCurrent(p)}
+						onclick={() => usePreset(p)}
+						title={`${INKS[p.brush].label}, ${p.width} pt`}
+						aria-label={`Saved ink: ${INKS[p.brush].label} ${p.color}, ${p.width} pt`}
+					>
+						{@render presetMark(p)}
+					</button>
+				{/each}
+			{/if}
 			<span class={col ? 'hr' : 'vr'}></span>
 			<button class="tool" onclick={() => noteStore.undo()} disabled={!noteStore.canUndo} title="Undo (Ctrl+Z)" aria-label="Undo">
 				<Icon name="undo" size={20} />
@@ -1170,6 +1218,11 @@
 		{/if}
 	{/snippet}
 
+	{#snippet presetMark(p: Preset)}
+		<!-- The brush's icon in the saved colour, sized by thickness, on paper so any colour shows. -->
+		<span class="dish" style:color={p.color}><Icon name={p.brush} size={presetSize(p)} stroke={2.25} /></span>
+	{/snippet}
+
 	{#snippet tucker(a: Anchor)}
 		<button class="tuck" onclick={() => bars.setHidden(a, true)} title="Tuck away (tap the tab at the edge to bring it back)" aria-label={`Hide ${groupLabel(a)}`}>
 			<Icon name={TUCK[a]} size={14} stroke={2.25} />
@@ -1212,27 +1265,31 @@
 		{#if pop === 'ink' && showRail}
 			<div class="pop inkpop" style={popStyle} data-pop transition:scale={{ start: 0.96, duration: 160 }}>
 				<div class="pophead">
-					<span class="serif">{BRUSHES[brush].label}</span>
+					<span class="serif">{INKS[brush].label}</span>
 					<span class="kicker">{strokeWidth.toFixed(1)} pt</span>
 				</div>
 				<svg class="preview" viewBox="0 0 240 70" aria-hidden="true">
-					<path
-						d="M14 48 C 46 10, 78 12, 104 34 S 168 62, 226 22"
-						fill="none"
-						stroke={color}
-						stroke-width={previewWidth}
-						stroke-linecap={brush === 'marker' ? 'butt' : 'round'}
-						opacity={brush === 'marker' ? MARKER_ALPHA + 0.25 : 1}
-					/>
+					{#if brush === 'text'}
+						<text x="14" y="46" fill={color} font-family={TEXT_FONT} font-size={Math.min(strokeWidth * 1.4, 44)}>Text Aa</text>
+					{:else}
+						<path
+							d="M14 48 C 46 10, 78 12, 104 34 S 168 62, 226 22"
+							fill="none"
+							stroke={color}
+							stroke-width={previewWidth}
+							stroke-linecap={brush === 'marker' ? 'butt' : 'round'}
+							opacity={brush === 'marker' ? MARKER_ALPHA + 0.25 : 1}
+						/>
+					{/if}
 				</svg>
 				<input
 					class="size"
 					type="range"
-					min={BRUSHES[brush].min}
-					max={BRUSHES[brush].max}
+					min={INKS[brush].min}
+					max={INKS[brush].max}
 					step="0.5"
 					bind:value={inks[brush].width}
-					aria-label={`${BRUSHES[brush].label} size`}
+					aria-label={`${INKS[brush].label} size`}
 				/>
 				<div class="swatches">
 					{#each palette as c (c)}
@@ -1244,6 +1301,29 @@
 							onclick={() => pickColor(c)}
 						></button>
 					{/each}
+				</div>
+				<div class="saved">
+					{#each presets as p, i (i)}
+						<span class="chip">
+							<button
+								class="preset"
+								class:on={isCurrent(p)}
+								onclick={() => usePreset(p)}
+								title={`${INKS[p.brush].label}, ${p.width} pt`}
+								aria-label={`Saved ink: ${INKS[p.brush].label} ${p.color}, ${p.width} pt`}
+							>
+								{@render presetMark(p)}
+							</button>
+							<button class="unsave" onclick={() => removePreset(i)} title="Forget this ink" aria-label="Forget this saved ink">
+								<Icon name="x" size={10} stroke={3} />
+							</button>
+						</span>
+					{/each}
+					{#if presets.length < MAX_PRESETS}
+						<button class="mini save" onclick={addPreset} disabled={presetSaved} title="Keep this brush, colour and size one tap away">
+							{presetSaved ? 'Saved' : presets.length ? '+ Save' : '+ Save this ink'}
+						</button>
+					{/if}
 				</div>
 			</div>
 		{/if}
@@ -1318,7 +1398,7 @@
 				<div class="pophead">
 					<span class="serif">Zotero</span>
 					{#if zotero.settings && !zoteroSetup}
-						<button class="mini" onclick={editZotero} title="Change the API key or file storage">{zotero.settings.username || 'Library'} · {zotero.settings.webdav ? 'WebDAV' : 'Zotero storage'}</button>
+						<button class="mini" onclick={() => (zoteroSetup = true)} title="Change the API key or file storage">{zotero.settings.username || 'Library'} · {zotero.settings.webdav ? 'WebDAV' : 'Zotero storage'}</button>
 					{/if}
 				</div>
 				{#if !account.signedIn}
@@ -1345,45 +1425,15 @@
 						<button class="btn primary" disabled={keepForm.busy}>Sign in</button>
 					</form>
 				{:else if zoteroSetup}
-					<form class="stack" onsubmit={connectZotero}>
-						<p class="fine">
-							Make an API key at <a href="https://www.zotero.org/settings/keys/new" target="_blank" rel="noreferrer">zotero.org/settings/keys</a>
-							with <b>library access</b> and <b>write access</b>. It stays on this device.
-						</p>
-						<input
-							class="input mono"
-							bind:value={zoteroForm.apiKey}
-							placeholder={zotero.settings ? 'API key (unchanged if empty)' : 'API key'}
-							autocomplete="off"
-							spellcheck="false"
-							required={!zotero.settings}
-						/>
-						<div class="seg" role="radiogroup" aria-label="Where Zotero keeps the files">
-							<label><input type="radio" value="zotero" bind:group={zoteroForm.storage} />Zotero storage</label>
-							<label><input type="radio" value="webdav" bind:group={zoteroForm.storage} />WebDAV</label>
-						</div>
-						{#if zoteroForm.storage === 'webdav'}
-							<p class="fine">As in Zotero's Sync settings. Koofr: <span class="mono">app.koofr.net/dav/Koofr</span>, your Koofr e-mail, and an app password (Koofr → Preferences → Password).</p>
-							<input class="input" bind:value={zoteroForm.url} placeholder="WebDAV URL" autocomplete="off" autocapitalize="none" spellcheck="false" required />
-							<input class="input" bind:value={zoteroForm.user} placeholder="User name" autocomplete="off" autocapitalize="none" spellcheck="false" />
-							<input class="input" type="password" bind:value={zoteroForm.password} placeholder="Password" autocomplete="off" required />
-						{/if}
-						{#if zoteroForm.error}<p class="err-dark">{zoteroForm.error}</p>{/if}
-						<div class="row2">
-							<button class="btn primary" disabled={zoteroForm.busy}>{zoteroForm.busy ? 'Checking…' : 'Connect'}</button>
-							{#if zotero.settings}
-								<button type="button" class="btn" onclick={() => (zoteroSetup = false)}>Cancel</button>
-								<button
-									type="button"
-									class="btn"
-									onclick={() => {
-										zotero.clear();
-										zoteroItems = null;
-									}}>Disconnect</button
-								>
-							{/if}
-						</div>
-					</form>
+					<ZoteroConnect
+						oncancel={() => (zoteroSetup = false)}
+						onconnected={() => {
+							zoteroSetup = false;
+							zoteroItems = null;
+							void findInZotero();
+						}}
+						ondisconnect={() => (zoteroItems = null)}
+					/>
 				{:else if zoteroOpen}
 					<button class="mini back" onclick={() => (zoteroOpen = null)}>← {zoteroOpen.item.title}</button>
 					<ul class="zlist">
@@ -1543,7 +1593,7 @@
 					</button>
 					<button
 						class="item"
-						disabled={noteStore.strokeCount === 0}
+						disabled={noteStore.strokeCount + noteStore.textCount === 0}
 						onclick={() => {
 							noteStore.clear();
 							pop = '';
@@ -1754,6 +1804,7 @@
 	.ibtn,
 	.tool,
 	.ink,
+	.preset,
 	.pct,
 	.word,
 	.people,
@@ -1778,10 +1829,11 @@
 	.ibtn {
 		padding: 0;
 	}
-	:is(.ibtn, .tool, .ink, .pct, .word, .people, .exit):hover:not(:disabled) {
+	:is(.ibtn, .tool, .ink, .pct, .word, .people, .exit):hover:not(:disabled),
+	.rail .preset:hover {
 		background: var(--ink-3);
 	}
-	:is(.ibtn, .tool, .ink, .pct, .word, .people, .exit):active:not(:disabled) {
+	:is(.ibtn, .tool, .ink, .preset, .pct, .word, .people, .exit):active:not(:disabled) {
 		transform: scale(0.94);
 	}
 	:is(.ibtn, .tool, .word, .people).on,
@@ -2287,9 +2339,9 @@
 		.rail:not(.col) {
 			gap: 1px;
 		}
-		/* nine buttons share what's left of the width */
+		/* ten buttons share what's left of the width */
 		.rail:not(.col) :is(.tool, .ink) {
-			width: clamp(28px, calc((100vw - 84px) / 9), 36px);
+			width: clamp(24px, calc((100vw - 92px) / 10), 36px);
 			min-width: 0;
 			height: 42px;
 			border-radius: 12px;
@@ -2351,6 +2403,69 @@
 		height: 8px;
 		border-radius: 50%;
 		flex: none;
+	}
+
+	/* Saved inks: on the rail, and in the ink panel with a way to forget them */
+	.preset {
+		display: grid;
+		width: 40px;
+		height: 40px;
+		padding: 0;
+		border-radius: 14px;
+	}
+	.preset .dish {
+		width: 28px;
+		height: 28px;
+		/* white ink on paper needs an edge */
+		filter: drop-shadow(0 0 0.6px rgb(25 24 20 / 0.55));
+	}
+	.preset.on .dish {
+		box-shadow: 0 0 0 2px var(--lime);
+	}
+	@media (max-height: 700px) {
+		.rail.col .preset {
+			width: 34px;
+			height: 32px;
+		}
+	}
+	.saved {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 4px;
+	}
+	.chip {
+		position: relative;
+	}
+	.saved .preset .dish {
+		width: 34px;
+		height: 34px;
+		background: var(--paper-2);
+	}
+	.saved .preset.on .dish {
+		box-shadow:
+			0 0 0 2px var(--sheet),
+			0 0 0 4px var(--ink);
+	}
+	.unsave {
+		position: absolute;
+		top: -3px;
+		right: -3px;
+		display: grid;
+		place-items: center;
+		width: 16px;
+		height: 16px;
+		padding: 0;
+		border: none;
+		border-radius: 50%;
+		background: var(--sheet);
+		color: var(--ink);
+		box-shadow: 0 0 0 1px rgb(25 24 20 / 0.25);
+		cursor: pointer;
+	}
+	.save:disabled {
+		opacity: 0.5;
+		cursor: default;
 	}
 
 	/* Small text buttons inside panels and notices */
@@ -2725,11 +2840,6 @@
 	}
 	.zotero .seg {
 		background: var(--paper-2);
-	}
-	.zotero a {
-		color: inherit;
-		text-decoration-color: var(--lime-deep);
-		text-decoration-thickness: 2px;
 	}
 	.mono {
 		font-family: var(--f-mono);

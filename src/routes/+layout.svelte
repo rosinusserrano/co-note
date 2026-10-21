@@ -4,6 +4,8 @@
 	import '@fontsource-variable/bricolage-grotesque/opsz.css';
 	import '@fontsource/dm-mono/400.css';
 	import '@fontsource/dm-mono/500.css';
+	// Text boxes: metric-compatible with Helvetica, which the PDF export uses.
+	import '@fontsource/arimo/400.css';
 	import '../app.css';
 	import { onMount } from 'svelte';
 	import { fly } from 'svelte/transition';

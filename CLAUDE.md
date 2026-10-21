@@ -23,7 +23,10 @@ the server, and many notes run in parallel. Devices on a note also link up
 **directly over WebRTC** (a star around one editor, introduced by the server)
 alongside the relay, and show each other's **cursor and visible area**; the
 owner can **bring everyone to their view**; editors have a **laser pointer**,
-and everyone sees strokes **while they're being drawn**. The UI is a
+and everyone sees strokes **while they're being drawn**. There are **text
+boxes**, **saved inks** (brush + colour + size, one tap away), and in PDFs a
+**preview of where a link leads** (a citation's reference entry) on hover.
+The UI is a
 "paper & ink" design (see *Design & chrome*): a full-bleed canvas with floating
 toolbars that step back while the pen is down, and a **focus mode** for devices
 that watch — chrome hidden, ink off, the view following the whole note or a
@@ -152,6 +155,18 @@ chosen device.
   in focus following the whole note; the focus bar hides when idle and returns
   on movement; following the owner tracks its zoom; F / Esc in and out of focus;
   returning home lists the notes; at 360px the top bar's two halves don't overlap.
+  Todo round (≈40 checks + the earlier bars/Zotero/round-trip/regress suites
+  re-run green): hand tool + wheel zooms, pen + wheel scrolls; saved inks
+  save/apply/forget, show on the rail, survive a reload; the start page's
+  Account tab connects Zotero; the vault on the server is opaque; a second
+  device signing in has the connection, a disconnect there reaches the first,
+  an older session unlocks with its password (wrong one refused), signing out
+  drops the key; text: tap places an editor, Esc stores, tap edits, undo
+  restores the old text, the eraser takes it, export carries it in
+  conote.json and reimports to the same place pixel-identical (not drawn
+  twice), pdf.js shows it where the canvas did; 10 tools fit the phone dock
+  at 320/360/390px; a citation link (synthetic PDF) previews just its entry,
+  cropped to its column, on hover and on a hand-tool tap, gone on moving off.
 - **Not yet verified on real hardware:** on-device stylus feel and the Android
   install path over HTTPS.
 - **Next:** see `ROADMAP.md`. Direct links run *alongside* the relay; the relay
@@ -292,7 +307,7 @@ must be preserved:
   below). Public API the UI depends on: `connect(id, { token, label })`/`disconnect()`,
   `renewToken(token)`, `access` (`'ok' | 'revoked' | 'gone'`),
   `strokes` (plain cached array — read together with the reactive `revision`
-  counter), `strokeCount`, `addStroke`, `removeStrokes(ids)`, `beginChange`,
+  counter), `strokeCount`, `texts`/`textCount`, `addStroke`, `setText`, `removeStrokes(ids)` (strokes and texts), `beginChange`,
   `clear`, `undo`/`redo`, `canUndo`/`canRedo`, `status`/`peers`/`direct`/`hub`
   for the sync indicator, `presence` (others) / `setPresence()` (us), and
   `pullEveryone()` / `pulled` (the owner's pulls).
@@ -307,6 +322,11 @@ must be preserved:
   `PageRenderer` for drawing pages at the current zoom.
 - `src/lib/notes/exportPdf.ts` — pdf-lib (lazy-loaded): pages + ink → PDF.
 - `src/lib/notes/files.ts` — this device's IndexedDB cache of imported PDFs.
+- `src/lib/notes/text.ts` — text box geometry (font, line height, baseline,
+  measured widths, bounds), shared by canvas, eraser, Fit and export.
+- `src/lib/notes/vault.ts` — sealing the account's vault (PBKDF2 → AES-GCM).
+- `src/lib/components/ZoteroConnect.svelte` — the Zotero key / storage form
+  (note panel and the start page's Account tab).
 - `src/lib/components/DrawingCanvas.svelte` — the canvas + all input. See below.
 - `src/lib/components/Icon.svelte` — the inline SVG icon set (mostly Lucide).
 - `src/app.css` — design tokens (colours, fonts, shadows) and the few shared
@@ -405,12 +425,25 @@ must be preserved:
 
 ### Zotero (`server/zotero.js`, `zotero.svelte.ts`, NoteView's Zotero panel)
 
-- **⋯ → From Zotero / Save to Zotero.** Signed-in only: the server relays
+- **⋯ → From Zotero / Save to Zotero**, set up there or on the start page's
+  Account tab. Signed-in only: the server relays
   (Zotero storage and WebDAV servers like Koofr don't allow cross-origin
   requests), so it must not be an open proxy. The device keeps the API key
   (and WebDAV URL/user/password) in localStorage `conote:zotero`; requests
-  carry them in the **body** (never headers/URLs — access logs), the server
-  stores none. `/api/zotero/{verify,search,pdfs}` are JSON routes;
+  carry them in the **body** (never headers/URLs — access logs).
+- **The account's vault** carries the connection to the account's other
+  devices: `{ zotero, at }` sealed on the device (`vault.ts`: PBKDF2-SHA256,
+  310k rounds, salt `conote vault:<account key>`, → AES-GCM) with a key
+  derived from the password at sign-in and kept beside the session
+  (`conote:account`.vault). The server stores the sealed string only
+  (`account.vault`, `/api/account/vault[/set]`, ≤ 12 000 chars), so its disk
+  and backups can't read it; it does still see keys in transit (it relays).
+  `account.sync()` → `pullVault()`: the newer `at` wins (pre-vault settings
+  count as `at = 1`); a local change pushes (`zotero.onchange`); a
+  disconnect is pushed as `zotero: null`. Sessions from before the vault have
+  no key until the password is entered once more (Account tab →
+  `account.unlock`). Signing out drops a connection that came via the vault.
+  Needs Web Crypto (https / localhost); elsewhere the vault is off. `/api/zotero/{verify,search,pdfs}` are JSON routes;
   `/api/zotero/file` returns the PDF; `/api/zotero/save` takes
   `[u32 length][JSON meta][PDF]`. Budget per IP and per account.
 - **Files:** Zotero storage via `/items/<key>/file` (download) and the
@@ -626,7 +659,8 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   laser always gives way to the pinch. Pen/mouse
   **pan** instead with the hand tool, Space held, the middle button, or in
   observe mode. Wheel **scrolls** (Shift: sideways; line/page `deltaMode`s
-  scaled), Ctrl+wheel (= trackpad pinch) **zooms** at the cursor. The wheel
+  scaled), Ctrl+wheel (= trackpad pinch) **zooms** at the cursor, and so
+  does the plain wheel with the hand tool (Shift+wheel still scrolls). The wheel
   listener is bound by hand with `passive: false`: its `preventDefault()` is
   what stops Ctrl+wheel zooming the browser page. `touch-action: none` — we own
   all gestures.
@@ -720,16 +754,49 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   a highlighter tints paper and leaves PDF text and pen ink dark. Export does
   the same: marker strokes first, inside an ExtGState with `BM /Multiply` and
   `ca/CA = MARKER_ALPHA`.
-- Each brush keeps its own colour and size in `NoteView` (`inks`); the
-  palette and slider edit the current brush, and the slider's range comes from
-  the preset.
+- Each brush (and text) keeps its own colour and size in `NoteView` (`inks`,
+  ranges in `INKS`); the palette and slider edit the current one, and the
+  slider's range comes from the preset. **Saved inks** (`presets`, localStorage
+  `conote:presets`, at most 6, validated on read): brush + colour + size,
+  saved and forgotten in the ink panel, shown on the rail (wide screens only;
+  phones use the panel) as the brush's icon in that colour, sized by where
+  the size sits in the brush's range.
 - **`mode = 'observe'`** disables inking but still allows pan/zoom — this is the
   README's "observer" session.
-- **Tools:** `tool = 'pen' | 'brush' | 'marker' | 'eraser' | 'laser' | 'hand'`
+- **Tools:** `tool = 'pen' | 'brush' | 'marker' | 'text' | 'eraser' | 'laser' | 'hand'`
   (the laser: see Presence). The eraser is stroke-level (removes whole
-  strokes it touches, via `strokeHit` distance testing) with a **screen-constant**
+  strokes it touches, via `strokeHit` distance testing, and text boxes whose
+  bounds it touches) with a **screen-constant**
   radius (`ERASER_SCREEN_RADIUS / viewport.scale` → world units), and one drag =
   one undo step.
+- **Text boxes** (`TextBox` in `model.ts`, their own `Y.Array` `texts` — a
+  separate array so clients from before text ignore them instead of
+  crashing in `inkShape`; tracked by the UndoManager). Top-left anchored,
+  page-local on a page like strokes, lines only at typed newlines, immutable:
+  an edit is `noteStore.setText(oldId, box)` (delete + push, one undo step;
+  empty text removes). A tap with the text tool (pen, mouse, or a finger
+  where fingers ink) opens a `<textarea>` over the canvas at the box
+  (`editing`), rendered and focused synchronously (`flushSync`) so phones
+  open the keyboard; the pointerdown is `preventDefault`ed or the compat
+  mousedown takes the focus back. Esc / Ctrl+Enter / blur / another tool
+  stores it; a blur into the ink panel (`[data-pop]`) keeps it open so the
+  colour and size restyle it. Drawn in Arimo (Helvetica-metric, self-hosted),
+  exported in Helvetica (standard font, nothing embedded) — same widths, and
+  `TEXT_ASCENT` puts the baseline where the textarea does. Characters
+  outside WinAnsi print as `?` in the PDF but stay in conote.json (`texts`).
+  Deliberate: text boxes are for quick remarks, not symbols, so no embedded
+  font (decided with the user).
+  No live preview to others while typing; it appears when stored.
+- **Link previews in PDFs** (`PageRenderer.links` / `.preview`): a page's
+  internal Link annotations (with a `dest`, no URL) are read once, page-local.
+  Hovering one (mouse or pen hover, `HOVER_MS`), or tapping it while moving
+  the view (hand tool, a finger on tablets, observers), shows a crop of the
+  destination: from its point, the column found from the page's text (lines
+  starting at its left edge, hanging indents allowed, plus what continues
+  them), down ~4.6 lines or to the next entry back at the left edge (hanging
+  indent / label column styles). Shown at the page's zoom (100–200%), within
+  640 px; gone on moving off, any pointerdown, or a view change.
+- **Hand tool + wheel** zooms (see the wheel note above).
 
 ## Design & chrome (`app.css`, `NoteView.svelte`, `Home.svelte`)
 

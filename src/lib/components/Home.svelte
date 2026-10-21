@@ -13,6 +13,9 @@
 	} from '$lib/notes/api';
 	import { noteIndex, myName, setMyName, isOwner, NAME_MAX, type NoteEntry } from '$lib/notes/noteIndex.svelte';
 	import { account } from '$lib/notes/account.svelte';
+	import { zotero } from '$lib/notes/zotero.svelte';
+	import { vaultAvailable } from '$lib/notes/vault';
+	import ZoteroConnect from './ZoteroConnect.svelte';
 	import { appUpdate } from '$lib/appUpdate.svelte';
 	import { destroyNoteData } from '$lib/notes/noteStore.svelte';
 
@@ -35,7 +38,9 @@
 				joinForm.busy ||
 				createForm.busy ||
 				accountForm.busy ||
-				!!(joinForm.passcode || createForm.name || createForm.editPasscode || createForm.viewPasscode || accountForm.password)
+				zoteroEditing ||
+				!!(unlockForm.password ||
+				joinForm.passcode || createForm.name || createForm.editPasscode || createForm.viewPasscode || accountForm.password)
 		)
 	);
 
@@ -54,6 +59,24 @@
 			accountForm.error = errorText(err);
 		} finally {
 			accountForm.busy = false;
+		}
+	}
+
+	/** Changing the Zotero connection (the form is open). */
+	let zoteroEditing = $state(false);
+	let unlockForm = $state({ password: '', busy: false, error: '' });
+
+	async function unlock(e: SubmitEvent) {
+		e.preventDefault();
+		unlockForm.busy = true;
+		unlockForm.error = '';
+		try {
+			await account.unlock(unlockForm.password);
+			unlockForm.password = '';
+		} catch (err) {
+			unlockForm.error = errorText(err);
+		} finally {
+			unlockForm.busy = false;
 		}
 	}
 
@@ -273,6 +296,38 @@
 							on, until its owner changes that passcode.
 						</p>
 						<button class="btn" onclick={signOut}>Sign out</button>
+					</div>
+					<div class="card zotero">
+						<h2>Zotero</h2>
+						{#if zotero.settings && !zoteroEditing}
+							<p class="note">
+								Connected to <b>{zotero.settings.username || 'your library'}</b>, files in
+								{zotero.settings.webdav ? 'WebDAV' : 'Zotero storage'}. In a note: ⋯ → From Zotero / Save to Zotero.
+							</p>
+							{#if account.vaultKey}
+								<p class="note">Kept in your account (encrypted): your other devices have it once you sign in there.</p>
+							{:else if vaultAvailable()}
+								<form class="unlock" onsubmit={unlock}>
+									<p class="note">Only on this device. Enter your password once to keep it in your account, for your other devices.</p>
+									<div class="pair">
+										<input class="input" type="password" bind:value={unlockForm.password} placeholder="Password" autocomplete="current-password" required />
+										<button class="btn" disabled={unlockForm.busy}>{unlockForm.busy ? '…' : 'Keep in account'}</button>
+									</div>
+									{#if unlockForm.error}<p class="error-text">{unlockForm.error}</p>{/if}
+								</form>
+							{/if}
+							<div class="pair">
+								<button class="btn" onclick={() => (zoteroEditing = true)}>Change</button>
+								<button class="btn" onclick={() => zotero.clear()}>Disconnect</button>
+							</div>
+						{:else}
+							<p class="note">Open papers from your Zotero library in a note, and save the annotated PDF back next to them.</p>
+							<ZoteroConnect
+								oncancel={zoteroEditing ? () => (zoteroEditing = false) : undefined}
+								onconnected={() => (zoteroEditing = false)}
+								ondisconnect={() => (zoteroEditing = false)}
+							/>
+						{/if}
 					</div>
 				{:else}
 					<form
@@ -664,6 +719,18 @@
 		text-decoration-color: var(--lime-deep);
 		text-decoration-thickness: 2px;
 		cursor: pointer;
+	}
+	.card + .card {
+		margin-top: 1rem;
+	}
+	.unlock {
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+	}
+	.unlock .input {
+		flex: 1;
+		min-width: 10rem;
 	}
 	.pair {
 		display: flex;

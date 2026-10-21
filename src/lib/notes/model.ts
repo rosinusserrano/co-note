@@ -43,6 +43,23 @@ export interface Stroke {
 }
 
 /**
+ * A text box: typed text with its top-left corner at (x, y) — world
+ * coordinates, or page-local (like a Stroke's points) when `page` is set.
+ * Lines break only where the text has newlines. Like strokes, text boxes are
+ * immutable once committed: editing one replaces it (see noteStore.setText).
+ */
+export interface TextBox {
+	id: string;
+	x: number;
+	y: number;
+	text: string;
+	/** Font size in world units (PDF points). */
+	size: number;
+	color: string;
+	page?: string;
+}
+
+/**
  * One page of the note, in export order. Sizes are PDF points (1 pt = 1 world
  * unit at 100% zoom).
  *

@@ -10,8 +10,9 @@
 //
 // Ink on a page is page-local, so recomputing this never moves ink off its page.
 
-import type { PageEntry, PageLayout, Stroke } from './model';
+import type { PageEntry, PageLayout, Stroke, TextBox } from './model';
 import type { Box } from './viewport.svelte';
+import { textBounds } from './text';
 
 /** Space between pages, world units (= PDF points at 100%). Leaves room for
  *  the page label above each page. */
@@ -52,9 +53,10 @@ export function pageAt(pages: PlacedPage[], wx: number, wy: number): PlacedPage 
 	return pages.find((p) => wx >= p.x && wx <= p.x + p.w && wy >= p.y && wy <= p.y + p.h);
 }
 
-/** World-space bounds of the pages and all visible ink (half a stroke's width
- *  included), or null for an empty note. Ink on a deleted page doesn't count. */
-export function contentBounds(strokes: Stroke[], pages: PlacedPage[]): Box | null {
+/** World-space bounds of the pages, all visible ink (half a stroke's width
+ *  included) and text, or null for an empty note. Ink on a deleted page
+ *  doesn't count. */
+export function contentBounds(strokes: Stroke[], pages: PlacedPage[], texts: TextBox[] = []): Box | null {
 	const byId = new Map(pages.map((p) => [p.id, p]));
 	let x0 = Infinity;
 	let y0 = Infinity;
@@ -82,6 +84,21 @@ export function contentBounds(strokes: Stroke[], pages: PlacedPage[]): Box | nul
 			x1 = Math.max(x1, pt.x + dx + r);
 			y1 = Math.max(y1, pt.y + dy + r);
 		}
+	}
+	for (const t of texts) {
+		let dx = 0;
+		let dy = 0;
+		if (t.page) {
+			const p = byId.get(t.page);
+			if (!p) continue;
+			dx = p.x;
+			dy = p.y;
+		}
+		const b = textBounds(t);
+		x0 = Math.min(x0, b.x + dx);
+		y0 = Math.min(y0, b.y + dy);
+		x1 = Math.max(x1, b.x + b.w + dx);
+		y1 = Math.max(y1, b.y + b.h + dy);
 	}
 	return x0 <= x1 ? { x0, y0, x1, y1 } : null;
 }

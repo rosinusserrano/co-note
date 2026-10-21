@@ -3,6 +3,11 @@
 // were added, and the ink on top as vector paths. Ink is page-local, so on each
 // page it's drawn through one transform: page-local → that page's PDF space.
 //
+// Text boxes go into the same ink stream, in Helvetica (a standard font, so
+// nothing is embedded; the canvas uses Arimo, which has the same widths).
+// Characters Helvetica can't encode (outside Latin-1, roughly) become "?" in
+// the drawn text; conote.json keeps them as typed.
+//
 // A note without pages exports its free ink on one page framing it. Free ink
 // in a note that has pages (drawn beside them) isn't on any page, so it isn't
 // exported.
@@ -18,8 +23,9 @@
 //
 // pdf-lib is loaded on first use.
 
-import type { PDFDocument, PDFPage, PDFOperator, PDFRef } from 'pdf-lib';
-import type { PageEntry, PageLayout, Stroke } from './model';
+import type { PDFDocument, PDFFont, PDFPage, PDFOperator, PDFRef } from 'pdf-lib';
+import type { PageEntry, PageLayout, Stroke, TextBox } from './model';
+import { TEXT_ASCENT, TEXT_LINE, textBounds, textLines } from './text';
 import { inkShape, hexToRgb, isMarker, MARKER_ALPHA, type InkRun } from './ink';
 import { CONOTE_FILE, CONOTE_LAYER, type ConoteData } from './conoteData';
 
@@ -36,6 +42,7 @@ const MARGIN = 24;
 export async function exportPdf(
 	pages: PageEntry[],
 	strokes: Stroke[],
+	texts: TextBox[],
 	getFile: (hash: string) => Promise<Uint8Array>,
 	layout: PageLayout = 'vertical'
 ): Promise<Uint8Array> {
@@ -50,7 +57,12 @@ export async function exportPdf(
 	out.catalog.set(PDFName.of('OCProperties'), ctx.obj({ OCGs: [layer], D: { Order: [layer] } }));
 
 	/** The ink again, as data: per page in export order. */
-	const data: ConoteData = { v: 1, layout, pages: [], strokes: [] };
+	const data: ConoteData = { v: 1, layout, pages: [], strokes: [], texts: [] };
+	const keepText = (t: TextBox, page: number, dx = 0, dy = 0) =>
+		data.texts.push({ x: round(t.x + dx, 100), y: round(t.y + dy, 100), text: t.text, size: t.size, color: t.color, page });
+	// Loaded only if there is text.
+	let font: PDFFont | null = null;
+	if (texts.length > 0) font = await out.embedFont(lib.StandardFonts.Helvetica);
 	const keep = (s: Stroke, page: number, dx = 0, dy = 0) =>
 		data.strokes.push({
 			color: s.color,
@@ -76,20 +88,29 @@ export async function exportPdf(
 		if (!list) onPage.set(key, (list = []));
 		list.push(s);
 	}
+	const textOn = new Map<string, TextBox[]>();
+	for (const t of texts) {
+		const key = t.page ?? '';
+		let list = textOn.get(key);
+		if (!list) textOn.set(key, (list = []));
+		list.push(t);
+	}
 
 	if (pages.length === 0) {
 		const free = onPage.get('') ?? [];
-		const b = bounds(free);
+		const freeText = textOn.get('') ?? [];
+		const b = bounds(free, freeText);
 		if (!b) {
 			out.addPage(); // nothing drawn: one empty page rather than an invalid PDF
 		} else {
 			const w = b.x1 - b.x0 + 2 * MARGIN;
 			const h = b.y1 - b.y0 + 2 * MARGIN;
 			const page = out.addPage([w, h]);
-			drawInk(lib, page, free, [1, 0, 0, -1, MARGIN - b.x0, h - MARGIN + b.y0], layer);
+			drawInk(lib, page, free, freeText, font, [1, 0, 0, -1, MARGIN - b.x0, h - MARGIN + b.y0], layer);
 			// Reopened, it's ink on this page: page-local, from its top-left.
 			data.pages.push({ extra: false });
 			for (const s of free) keep(s, 0, MARGIN - b.x0, MARGIN - b.y0);
+			for (const t of freeText) keepText(t, 0, MARGIN - b.x0, MARGIN - b.y0);
 		}
 		return finish();
 	}
@@ -125,9 +146,10 @@ export async function exportPdf(
 			page = out.addPage([p.w, p.h]);
 			m = [1, 0, 0, -1, 0, p.h]; // page-local is y-down from the top-left
 		}
-		drawInk(lib, page, onPage.get(p.id) ?? [], m, layer);
+		drawInk(lib, page, onPage.get(p.id) ?? [], textOn.get(p.id) ?? [], font, m, layer);
 		data.pages.push({ extra: p.extra });
 		for (const s of onPage.get(p.id) ?? []) keep(s, index);
+		for (const t of textOn.get(p.id) ?? []) keepText(t, index);
 	}
 	return finish();
 }
@@ -137,11 +159,18 @@ const round = (v: number, k: number) => Math.round(v * k) / k;
 /** The key that marks a content stream as conote's ink. */
 const INK_MARK = 'ConoteInk';
 
-function bounds(strokes: Stroke[]) {
+function bounds(strokes: Stroke[], texts: TextBox[]) {
 	let x0 = Infinity;
 	let y0 = Infinity;
 	let x1 = -Infinity;
 	let y1 = -Infinity;
+	for (const t of texts) {
+		const b = textBounds(t);
+		x0 = Math.min(x0, b.x);
+		y0 = Math.min(y0, b.y);
+		x1 = Math.max(x1, b.x + b.w);
+		y1 = Math.max(y1, b.y + b.h);
+	}
 	for (const s of strokes) {
 		const r = s.width / 2;
 		for (const p of s.points) {
@@ -157,8 +186,16 @@ function bounds(strokes: Stroke[]) {
 /** Bézier circle constant. */
 const K = 0.5522847498;
 
-function drawInk(lib: typeof import('pdf-lib'), page: PDFPage, strokes: Stroke[], m: Mat, layer: PDFRef) {
-	if (strokes.length === 0) return;
+function drawInk(
+	lib: typeof import('pdf-lib'),
+	page: PDFPage,
+	strokes: Stroke[],
+	texts: TextBox[],
+	font: PDFFont | null,
+	m: Mat,
+	layer: PDFRef
+) {
+	if (strokes.length === 0 && texts.length === 0) return;
 	const {
 		pushGraphicsState,
 		popGraphicsState,
@@ -176,7 +213,12 @@ function drawInk(lib: typeof import('pdf-lib'), page: PDFPage, strokes: Stroke[]
 		appendBezierCurve,
 		closePath,
 		stroke,
-		fill
+		fill,
+		beginText,
+		endText,
+		setFontAndSize,
+		setTextMatrix,
+		showText
 	} = lib;
 
 	/** A smoothed path: quadratics raised to cubics exactly (PDF has no
@@ -265,6 +307,23 @@ function drawInk(lib: typeof import('pdf-lib'), page: PDFPage, strokes: Stroke[]
 		ops.push(popGraphicsState());
 	}
 	strokes.filter((s) => !isMarker(s)).forEach(draw);
+
+	// Text on top. The transform above flips y (page-local runs down), so each
+	// line's text matrix flips it back.
+	if (font && texts.length > 0) {
+		const key = page.node.newFontDictionary(font.name, font.ref);
+		const known = new Set(font.getCharacterSet());
+		const safe = (line: string) => [...line].map((ch) => (known.has(ch.codePointAt(0)!) ? ch : '?')).join('');
+		for (const t of texts) {
+			const [r, g, b] = hexToRgb(t.color);
+			ops.push(beginText(), setFillingRgbColor(r, g, b), setFontAndSize(key, t.size));
+			textLines(t).forEach((line, i) => {
+				if (!line) return;
+				ops.push(setTextMatrix(1, 0, 0, -1, t.x, t.y + t.size * (TEXT_ASCENT + i * TEXT_LINE)), showText(font.encodeText(safe(line))));
+			});
+			ops.push(endText());
+		}
+	}
 
 	ops.push(popGraphicsState(), Op.of('EMC' as never));
 	// A stream of its own, marked, after the page's own content (normalize

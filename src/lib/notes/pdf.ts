@@ -91,6 +91,25 @@ interface PageState {
 	lastUsed: number;
 }
 
+/** A link inside the PDF (a citation, a cross-reference), page-local. */
+export interface PdfLink {
+	x: number;
+	y: number;
+	w: number;
+	h: number;
+	/** Named or explicit destination, as pdf.js gives it. */
+	dest: string | unknown[];
+}
+
+/** A rendered crop of a link's destination: `w` × `h` in PDF points,
+ *  meant to be shown `css` CSS px per point. */
+export interface LinkPreview {
+	canvas: HTMLCanvasElement;
+	w: number;
+	h: number;
+	css: number;
+}
+
 /** Whole-page bitmaps up to this many device pixels (A4 at 200% on a 2× screen). */
 const FULL_PAGE_MAX_PX = 8_000_000;
 /** All bitmaps together; beyond this, pages out of view lose theirs. */
@@ -105,6 +124,9 @@ export class PageRenderer {
 	#pages = new Map<string, PageState>();
 	#failed = new Set<string>();
 	#destroyed = false;
+	/** Per page id: its internal links once read (null while reading). */
+	#links = new Map<string, PdfLink[] | null>();
+	#previews = new Map<string, Promise<LinkPreview | null>>();
 
 	/** `getBytes` fetches a file by hash; `onUpdate` is called when a better
 	 *  bitmap is ready (or a file failed), i.e. when it's worth repainting. */
@@ -227,6 +249,141 @@ export class PageRenderer {
 		}
 	}
 
+	/**
+	 * The page's internal links (citations, references to figures…), or null
+	 * while they're being read — `onUpdate` fires once they're in.
+	 */
+	links(page: PlacedPage): PdfLink[] | null {
+		if (!page.pdf) return [];
+		if (this.#links.has(page.id)) return this.#links.get(page.id)!;
+		this.#links.set(page.id, null);
+		const { file, index, vt } = page.pdf;
+		void (async () => {
+			const out: PdfLink[] = [];
+			try {
+				const doc = await this.#doc(file);
+				const pp = doc && (await doc.getPage(index + 1));
+				for (const a of pp ? await pp.getAnnotations({ intent: 'display' }) : []) {
+					if (a.subtype !== 'Link' || !a.dest || a.url) continue;
+					const [x1, y1, x2, y2] = a.rect as number[];
+					const p = apply(vt, x1, y1);
+					const q = apply(vt, x2, y2);
+					out.push({ x: Math.min(p[0], q[0]), y: Math.min(p[1], q[1]), w: Math.abs(q[0] - p[0]), h: Math.abs(q[1] - p[1]), dest: a.dest });
+				}
+			} catch {
+				/* no links then */
+			}
+			if (this.#destroyed) return;
+			this.#links.set(page.id, out);
+			this.#onUpdate();
+		})();
+		return null;
+	}
+
+	/**
+	 * Where a link leads, cropped to what's there: the reference entry a
+	 * citation points to, say. The crop starts at the destination and takes
+	 * in the lines of text below it in that column (found from the page's
+	 * text), a few lines deep. Rendered for `css` CSS px per point, or less
+	 * if that would be wider than `maxWidth` CSS px.
+	 */
+	preview(file: string, dest: string | unknown[], css: number, maxWidth: number, dpr: number): Promise<LinkPreview | null> {
+		const key = `${file}|${JSON.stringify(dest)}|${css}|${maxWidth}|${dpr}`;
+		let p = this.#previews.get(key);
+		if (!p) {
+			p = this.#preview(file, dest, css, maxWidth, dpr).catch(() => null);
+			this.#previews.set(key, p);
+		}
+		return p;
+	}
+
+	async #preview(file: string, dest: string | unknown[], css: number, maxWidth: number, dpr: number): Promise<LinkPreview | null> {
+		const doc = await this.#doc(file);
+		if (!doc || this.#destroyed) return null;
+		const explicit = typeof dest === 'string' ? await doc.getDestination(dest) : dest;
+		if (!Array.isArray(explicit) || explicit.length < 2) return null;
+		const ref = explicit[0];
+		const pageIndex = typeof ref === 'number' ? ref : await doc.getPageIndex(ref as never);
+		const pp = await doc.getPage(pageIndex + 1);
+		const vp = pp.getViewport({ scale: 1 });
+		// The destination's point in PDF space (null: that coordinate isn't given).
+		const kind = (explicit[1] as { name?: string } | null)?.name;
+		const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+		let left: number | null = null;
+		let top: number | null = null;
+		if (kind === 'XYZ') [left, top] = [num(explicit[2]), num(explicit[3])];
+		else if (kind === 'FitH' || kind === 'FitBH') top = num(explicit[2]);
+		else if (kind === 'FitR') [left, top] = [num(explicit[2]), num(explicit[5])];
+		const [px, py] = vp.convertToViewportPoint(left ?? pp.view[0], top ?? pp.view[3]) as [number, number];
+
+		// The text below the destination: each item's left, baseline, width, height (page-local).
+		const items = (await pp.getTextContent()).items
+			.filter((it): it is typeof it & { str: string; transform: number[]; width: number; height: number } => 'str' in it && it.str.trim() !== '')
+			.map((it) => {
+				const [x, y] = vp.convertToViewportPoint(it.transform[4], it.transform[5]) as [number, number];
+				return { x, y, w: it.width, h: it.height || Math.hypot(it.transform[2], it.transform[3]) };
+			});
+		const near = items.filter((it) => it.y >= py - 1 && it.y <= py + 60);
+		const lineH = near.length ? Math.max(6, median(near.map((it) => it.h)) * 1.2) : 12;
+		const below = items.filter((it) => it.y >= py - 1 && it.y <= py + lineH * 4.6);
+		// The column: lines starting at the destination's left edge (hanging
+		// indents allowed), then whatever continues them to the right.
+		let x0 = left === null ? 0 : px - 4;
+		let x1 = x0;
+		for (const it of below) if (it.x >= x0 && it.x <= px + 40) x1 = Math.max(x1, it.x + it.w);
+		for (let grew = true; grew; ) {
+			grew = false;
+			for (const it of below) {
+				if (it.x >= x0 && it.x <= x1 + 6 && it.x + it.w > x1) {
+					x1 = it.x + it.w;
+					grew = true;
+				}
+			}
+		}
+		if (x1 - x0 < 40) x1 = Math.min(vp.width, x0 + 320);
+		x0 = Math.max(0, x0);
+		x1 = Math.min(vp.width, x1 + 4);
+		const y0 = Math.max(0, py - 2);
+		let y1 = Math.min(vp.height, py + lineH * 4.6);
+		// Entries set with a hanging indent (or a label column): the next line
+		// back at the left edge starts the next entry, so stop there.
+		if (left !== null) {
+			const lines = new Map<number, number>(); // baseline → leftmost x, in this column
+			for (const it of below) {
+				if (it.x < x0 || it.x > x1) continue;
+				const b = Math.round(it.y);
+				lines.set(b, Math.min(lines.get(b) ?? Infinity, it.x));
+			}
+			const rows = [...lines].sort((a, b) => a[0] - b[0]);
+			const atEdge = (x: number) => Math.abs(x - rows[0]?.[1]) <= 2;
+			if (rows.length > 1 && rows.slice(1).some(([, x]) => !atEdge(x))) {
+				const next = rows.slice(1).find(([, x]) => atEdge(x));
+				if (next) y1 = Math.min(y1, next[0] - lineH * 0.8);
+			}
+		}
+		const w = x1 - x0;
+		const h = y1 - y0;
+		if (w <= 0 || h <= 0) return null;
+
+		css = Math.min(css, maxWidth / w);
+		const scale = css * dpr;
+		const canvas = document.createElement('canvas');
+		canvas.width = Math.max(1, Math.ceil(w * scale));
+		canvas.height = Math.max(1, Math.ceil(h * scale));
+		const ctx = canvas.getContext('2d');
+		if (!ctx) return null;
+		let oc = this.#oc.get(file);
+		if (!oc) this.#oc.set(file, (oc = withoutConoteInk(doc).catch(() => null)));
+		const config = await oc;
+		await pp.render({
+			canvasContext: ctx,
+			viewport: pp.getViewport({ scale }),
+			transform: [1, 0, 0, 1, -x0 * scale, -y0 * scale],
+			...(config ? { optionalContentConfigPromise: Promise.resolve(config) } : {})
+		}).promise;
+		return { canvas, w, h, css };
+	}
+
 	/** Over budget: drop the bitmaps used longest ago, never `keep`'s. */
 	#evict(keep: string) {
 		const px = (b: Bitmap) => b.canvas.width * b.canvas.height;
@@ -247,7 +404,16 @@ export class PageRenderer {
 		this.#destroyed = true;
 		for (const st of this.#pages.values()) if (st.timer) clearTimeout(st.timer);
 		this.#pages.clear();
+		this.#links.clear();
+		this.#previews.clear();
 		for (const d of this.#docs.values()) void d.then((doc) => doc?.destroy());
 		this.#docs.clear();
 	}
+}
+
+const apply = (m: number[], x: number, y: number) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+
+function median(v: number[]) {
+	const s = [...v].sort((a, b) => a - b);
+	return s[Math.floor(s.length / 2)];
 }

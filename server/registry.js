@@ -477,6 +477,23 @@ export function forget(account, { id }) {
 	return { ok: true };
 }
 
+// The vault: one opaque blob per account, sealed on the devices with a key
+// derived from the password (src/lib/notes/vault.ts) — today the Zotero
+// connection. The server only keeps it.
+const MAX_VAULT = 12_000; // inside the 16 KB request limit
+
+export function getVault(account) {
+	return { vault: typeof account.vault === 'string' ? account.vault : null };
+}
+
+export function setVault(account, { vault }) {
+	if (typeof vault !== 'string' || vault.length > MAX_VAULT || !/^v1\.[A-Za-z0-9+/=]+\.[A-Za-z0-9+/=]+$/.test(vault))
+		throw new HttpError(400, 'Malformed vault.');
+	account.vault = vault;
+	saveAccounts();
+	return { ok: true };
+}
+
 /** The owner (by key) puts an unsaved or legacy note into their account: it's kept from now on. */
 export async function claim(account, { id, ownerKey }) {
 	const note = await asOwner(id, ownerKey, account);
