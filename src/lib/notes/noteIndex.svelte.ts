@@ -27,6 +27,8 @@ export interface NoteEntry {
 	owned?: boolean;
 	/** False: nobody's account keeps it, so it ends when everyone leaves. */
 	saved?: boolean;
+	/** No editor passcode: only the owner's account opens it. */
+	private?: boolean;
 	/** The account this entry came from or was saved to: signing out forgets it. */
 	via?: string;
 	openedAt: number;
@@ -76,12 +78,20 @@ class NoteIndex {
 			ownerProof: session.ownerProof ?? prev?.ownerProof,
 			owned: session.owned ?? prev?.owned,
 			saved: session.saved ?? prev?.saved,
+			private: session.private ?? prev?.private,
 			via: opts.via ?? prev?.via,
 			openedAt: opts.openedAt ?? Date.now()
 		};
 		this.notes = [...this.notes.filter((n) => n.id !== entry.id), entry];
 		this.#persist();
 		return entry;
+	}
+
+	/** The note was renamed (seen in its doc, or the account's list). */
+	rename(id: string, name: string) {
+		if (!this.get(id) || this.get(id)!.name === name) return;
+		this.notes = this.notes.map((n) => (n.id === id ? { ...n, name } : n));
+		this.#persist();
 	}
 
 	touch(id: string) {

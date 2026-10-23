@@ -24,8 +24,12 @@ the server, and many notes run in parallel. Devices on a note also link up
 alongside the relay, and show each other's **cursor and visible area**; the
 owner can **bring everyone to their view**; editors have a **laser pointer**,
 and everyone sees strokes **while they're being drawn**. There are **text
-boxes**, **saved inks** (brush + colour + size, one tap away), and in PDFs a
-**preview of where a link leads** (a citation's reference entry) on hover.
+boxes**, **saved inks** (brush + colour + size, one tap away), a **lasso**
+(move, copy, cut, paste, delete), optional **dots on pages**, in PDFs a
+**preview of where a link leads** (a citation's reference entry) on hover,
+a **page picker** for long PDFs (a chapter from the outline, or a range),
+**renaming** notes, and **private notes** (no passcode: only the owner's
+account opens them).
 The UI is a
 "paper & ink" design (see *Design & chrome*): a full-bleed canvas with floating
 toolbars that step back while the pen is down, and a **focus mode** for devices
@@ -93,7 +97,7 @@ chosen device.
   owner's people list, canvas cursor tag (only with others shown) and the
   observer's focus chip and pulled notice use the names; remembered per
   device; without one, `Role · device` as before.
-  Pull-glide round (14 checks, two editors): the owner's corner has *Bring
+  Pull-glide round (14 checks, two editors; the glide itself since replaced by the arc, see Notes round): the owner's corner has *Bring
   everyone here* before focus (disabled alone, absent for other editors); a
   far, zoomed-in editor zooms out (195% → 20%) and back in to exactly the
   owner's view (pixel-identical), zoom only falling then rising, ~1.6 s; from
@@ -167,6 +171,41 @@ chosen device.
   twice), pdf.js shows it where the canvas did; 10 tools fit the phone dock
   at 320/360/390px; a citation link (synthetic PDF) previews just its entry,
   cropped to its column, on hover and on a hand-tool tap, gone on moving off.
+  Lasso round (25 + 5 checks, mouse and touch): a drag on the canvas with
+  the ⋯ menu open only closes it (no stroke; also with a finger on a
+  phone), the next one draws; S picks the lasso; a loop takes the stroke
+  inside it and not the one outside; dragging the selection moves it, one
+  undo puts it back; Ctrl+C, a tap elsewhere offers Paste, which puts the
+  copy there; Delete, Ctrl+V under the pointer, undo; a text box moves, cuts
+  and pastes; another tool drops the selection; `place()` puts items onto
+  the page under their start, page-local, with new ids; *Dots on pages*
+  draws the grid on the pages and is remembered; 11 tools fit the phone
+  dock at 320/360/390px. Regress, text, text round trip, bars, presets,
+  round trip and cite suites re-run green.
+  Notes round (31 API + 28 browser checks): signed in, *Only my account*
+  creates a private note (no passcodes); its account opens it by name with
+  no passcode, another account / signed out / any passcode can't, and an
+  empty passcode answers as slowly for unknown names; a note B joined once
+  opens by name without one; making it private locks B's grant and the old
+  passcode, a new editor passcode opens it again; rename: normalised, the
+  doc on a live socket gets the name, old name stops joining and is free
+  again, taken / bad / non-owner refused, works with the owner key; a
+  device signing in brings its notes into the account (one it created
+  becomes the account's and kept; forged tokens and wrong owner keys only
+  ignored / granted); both devices of an account list each other's notes,
+  a note deleted on one leaves the other's list; the other device on the
+  note sees the new title; a 40-page PDF with an outline asks which pages
+  (chapters with their spans, typed ranges, Cancel), imports just those
+  (keeping their page index), a short one comes straight in, one undo
+  step each. Pen button (6 checks, pen over CDP): the barrel erases when
+  reported at touch-down, only while hovering just before, or only after
+  touching (no stroke left); a plain pen still draws; the menu shows the
+  last pen touch. Pull arc (6 checks, two editors, the far device's
+  transform every frame): log zoom fits a downward parabola in time
+  (worst miss ~1.4% of its range), out and back in; position 4% of the way
+  in the first + last 15% of the time, 60% in the middle 30%; ends exactly
+  on the owner's view; a target inside the view only zooms in.
+  Accounts and the earlier suites re-run green.
 - **Not yet verified on real hardware:** on-device stylus feel and the Android
   install path over HTTPS.
 - **Next:** see `ROADMAP.md`. Direct links run *alongside* the relay; the relay
@@ -307,7 +346,8 @@ must be preserved:
   below). Public API the UI depends on: `connect(id, { token, label })`/`disconnect()`,
   `renewToken(token)`, `access` (`'ok' | 'revoked' | 'gone'`),
   `strokes` (plain cached array — read together with the reactive `revision`
-  counter), `strokeCount`, `texts`/`textCount`, `addStroke`, `setText`, `removeStrokes(ids)` (strokes and texts), `beginChange`,
+  counter), `strokeCount`, `texts`/`textCount`, `addStroke`, `setText`, `removeStrokes(ids)` (strokes and texts),
+  `replaceItems(remove, strokes, texts)` (one undo step: lasso move / cut / paste), `beginChange`,
   `clear`, `undo`/`redo`, `canUndo`/`canRedo`, `status`/`peers`/`direct`/`hub`
   for the sync indicator, `presence` (others) / `setPresence()` (us), and
   `pullEveryone()` / `pulled` (the owner's pulls).
@@ -325,6 +365,8 @@ must be preserved:
 - `src/lib/notes/text.ts` — text box geometry (font, line height, baseline,
   measured widths, bounds), shared by canvas, eraser, Fit and export.
 - `src/lib/notes/vault.ts` — sealing the account's vault (PBKDF2 → AES-GCM).
+- `src/lib/notes/selection.ts` — the lasso: what a loop takes, moving /
+  placing items (re-homed onto pages), the per-device clipboard.
 - `src/lib/components/ZoteroConnect.svelte` — the Zotero key / storage form
   (note panel and the start page's Account tab).
 - `src/lib/components/DrawingCanvas.svelte` — the canvas + all input. See below.
@@ -338,8 +380,9 @@ must be preserved:
 - `src/lib/components/NoteView.svelte` — floating chrome + canvas for one note;
   owns the session `Viewport`, tools/inks, draw/observe mode, follow and focus
   mode, keyboard shortcuts, the panels (people, share, more, ink) and notices.
-- `src/lib/components/NoteSettings.svelte` — owner dialog: passcodes, observer
-  access, delete.
+- `src/lib/components/NoteSettings.svelte` — owner dialog: name, passcodes
+  (or private), observer access, delete.
+- `src/lib/components/PagePicker.svelte` — which pages of a long PDF to import.
 - `server/sync-server.js` — HTTP API (`/api/*`) + authenticated Yjs relay +
   authenticated P2P matchmaking (`/signal/<id>`).
 - `server/registry.js` — notes, hashed passcodes, tokens, on-disk storage
@@ -371,6 +414,22 @@ must be preserved:
   unaffected.
 - `passcodeError` refuses common passcodes, runs/repeats (`1234`, `aaaa`, `dcba`)
   and the note's own name. Minimum length is still 4.
+- **Private notes** (`note.edit === null`, `session.private`): created
+  signed in with *Only my account*, no passcodes (observers `none`). Only
+  the account the note belongs to opens it — from its list, or by name with
+  an empty passcode. The owner can give it an editor passcode later
+  (settings), or make an account-owned note private again (`private: true`
+  in `/api/owner/settings`: editor epoch bumps, other accounts' edit grants
+  lock).
+- **Joining by name without a passcode** works for any note the signed-in
+  account already holds (`join`: owner account, or a grant at the current
+  epoch). An empty passcode otherwise answers like a wrong one, as slowly.
+- **Renaming** (`/api/owner/rename`, owner): normalised and unique like
+  create; the old name is freed. The server also writes the name into the
+  doc's `meta.name` (`stampName`: the live room, or the stored doc), so
+  devices on the note — and anyone opening it later — update their list
+  entry (`noteStore.name` → `noteIndex.rename`). Display only: an editor
+  could write `meta.name` too, but joining always goes by the registry.
 - The **owner key** is returned only once, at creation, and lives only in the
   creating device's `noteIndex` entry. It is the only way to change settings or
   delete. Forgetting the note on that device loses it (the UI warns).
@@ -411,6 +470,14 @@ must be preserved:
   signed-in account (`asOwner`); `isOwner(entry)` on the client. *Keep in my
   account* (⋯ menu, owner only, signs in / registers inline) is
   `/api/account/claim`: ephemeral or legacy → `'account'`.
+- **The device's list is the account's** (`account.sync()`, on Home: on
+  arrival, on focus / coming back, and every minute while visible). It
+  first pushes the entries this device has without an account
+  (`/api/account/add`: their tokens; with a matching owner key, a note no
+  account owns becomes this one's — kept), then pulls every grant, and
+  drops entries from this account that it no longer lists (deleted, or
+  forgotten on another device) — except unsaved ones that ended, whose last
+  copy is only here, and the note that's open.
 - **Signing out forgets the account's notes on the device** (entries with
   `via` = that account, and their local data): a borrowed laptop keeps
   nothing. Entries joined signed out stay.
@@ -547,6 +614,13 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   from copied pages before drawing the ink again — so ink is never drawn
   twice, however many round trips. Other viewers show the layer as normal.
   Keep the marker key and layer name stable: old exports depend on them.
+- **Long PDFs** (≥ `PICK_PAGES_FROM`, 31 pages) ask which pages to take
+  (`importPdf(file, choose)` → `PagePicker`): the outline's first two levels
+  as chapters (`readChapters`: each up to the next bookmark at its level or
+  above), or a typed range, or all. The whole file is still uploaded; the
+  chosen pages keep their `pdf.index`, so export and link previews (a
+  citation pointing into the unimported references) still work. Ink from a
+  conote export is taken for the chosen pages only.
 - pdf.js and pdf-lib are dynamic imports; notes without PDFs never load them.
   The pdf.js worker (`.mjs`) is in the PWA precache.
 
@@ -597,14 +671,17 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   Receivers act once per `(client, n)` (`#readPulls` → `noteStore.pulled`):
   `NoteView` turns *Follow* off and calls `DrawingCanvas.showView`, which
   glides to fit that rect and **waits for pen-up** if a stroke or gesture is
-  under way. The glide **never slides**: the screen's edges move outward until
-  the current view and the target are both in sight (`outerView`), then inward
-  onto the target — each half one zoom about a fixed world point
-  (`zoomBetween`). Time is split between the halves by their share of the
-  zoom; the speed is full at the start and end and eases down to
-  `PULL_TURN_SPEED` (35%) at the turn — slower there, never stopped (an
-  in-out ease stopped it; the plain one reversed at full speed). Length from `PULL_MIN_MS` +
-  `PULL_MS_PER_EFOLD` × zoom travelled, capped at `PULL_MAX_MS`. A far jump
+  under way. The glide is an **arc** (`arc`), like something thrown (the
+  user asked for a parabola): the zoom — log of the view's width — is an
+  exact parabola in time, out and back in, its top where the current view
+  and the target are both in sight (`outerView`); the centre moves along
+  the straight line between the two, its progress the running share of
+  width × sin(πk), so slow at the start and end and fastest while far out.
+  When the target is inside the view (or around it), the parabola's top
+  lands on an end: a plain zoom, no detour. (Replaced the earlier
+  "never slides" two-zoom glide with its `PULL_TURN_SPEED`.) Length from
+  `PULL_MIN_MS` + `PULL_MS_PER_EFOLD` × zoom travelled, capped at
+  `PULL_MAX_MS`. A far jump
   goes far out; a target inside the current view is a plain zoom. This is the one time a
   device's viewport is set from outside — a one-shot jump by the owner; the
   viewport is still never synced, and anyone can move away right after.
@@ -650,7 +727,12 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   and Android report it as the secondary button alone) uses the `penButton`
   prop instead of the tool: eraser, marker (in the marker's own colour and
   size), laser or hand, set in the ⋯ menu per device (localStorage
-  `conote:penButton`, default eraser); *Nothing* ignores such contacts. A
+  `conote:penButton`, default eraser); *Nothing* ignores such contacts.
+  Pens differ in *when* they report the barrel: with the touch-down, only
+  while hovering just before (`barrelSeenAt`, `BARREL_HOVER_MS`), or a moment
+  after (`lateButton`: within `BARREL_LATE_MS` the young stroke is aborted
+  and restarts as the button's tool) — all count. The ⋯ menu shows the last
+  pen touch's `button`/`buttons` (`onpentouch`) for diagnosing a new pen. A
   **finger stroke that a second finger joins
   within `FINGER_SETTLE_MS`** was the start of a pinch: it's aborted (never
   committed, no undo step) and both fingers zoom; its live preview is held
@@ -763,7 +845,7 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   the size sits in the brush's range.
 - **`mode = 'observe'`** disables inking but still allows pan/zoom — this is the
   README's "observer" session.
-- **Tools:** `tool = 'pen' | 'brush' | 'marker' | 'text' | 'eraser' | 'laser' | 'hand'`
+- **Tools:** `tool = 'pen' | 'brush' | 'marker' | 'text' | 'eraser' | 'lasso' | 'laser' | 'hand'`
   (the laser: see Presence). The eraser is stroke-level (removes whole
   strokes it touches, via `strokeHit` distance testing, and text boxes whose
   bounds it touches) with a **screen-constant**
@@ -787,6 +869,23 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   Deliberate: text boxes are for quick remarks, not symbols, so no embedded
   font (decided with the user).
   No live preview to others while typing; it appears when stored.
+- **Lasso** (`selection.ts`; key S): a loop takes the strokes with at
+  least half their points inside and the text boxes whose middle is.
+  `selection` keeps their ids and world copies; a frame shows it, with
+  Copy / Cut / Delete above (and Ctrl+C / X, Delete, Esc). Dragging inside
+  the frame moves it: the items leave the base layer and are drawn shifted
+  (`drawMoving`) until pen-up, then `replaceItems` swaps them for moved
+  copies (new ids — items are immutable) in one undo step, each re-homed
+  onto the page under its start (`place`). A tap with the lasso offers
+  *Paste* there when something is copied; Ctrl+V pastes under the pointer
+  (any tool; the lasso then selects it). The clipboard is per device
+  (localStorage `conote:clip`), so it works across notes and tabs. A
+  selection follows the doc (undo, others erasing) and ends with another
+  tool. Lasso and drag count as inking (view holds still, palms ignored, a
+  second finger turns it into a pinch).
+- **Dots on pages** (⋯ menu, notes with pages; per device, localStorage
+  `conote:pageDots`): the desk's dot grid drawn over the pages too
+  (`drawPageDots`, under the ink), for lining up geometry. Screen only.
 - **Link previews in PDFs** (`PageRenderer.links` / `.preview`): a page's
   internal Link annotations (with a `dest`, no URL) are read once, page-local.
   Hovering one (mouse or pen hover, `HOVER_MS`), or tapping it while moving
@@ -830,7 +929,9 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   truly centred, a row too full for one line moves the centre inward (top) or
   the corners up (bottom), and the title shrinks first (`TITLE_MIN`). Panels
   (`pop`: people, share, more, ink — one at a time, closed by a pointerdown
-  outside any `[data-pop]`) hang off the button that opened them, clear of
+  outside any `[data-pop]`; on the canvas that pointer — and fingers joining
+  it — is swallowed in the capture phase (`closeFirst` in `NoteView`), so
+  tapping away from a panel never also draws) hang off the button that opened them, clear of
   its capsule, toward the middle of the screen (`popStyle`).
 - **The chrome steps back while the pen is down.** `DrawingCanvas` calls
   `onactive(true/false)` around strokes and the laser; `NoteView` sets
@@ -848,8 +949,8 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   `DrawingCanvas.follow`, which eases toward it, and falls back if the device
   leaves. Any hand pan/zoom sets
   `follow = null`, as before.
-- **Keyboard** (not while typing): P B M E L H tools, Ctrl+Z / Ctrl+Shift+Z
-  (or Ctrl+Y), F focus, 1 fit, 0 100%, +/− zoom, Esc closes a panel / leaves
+- **Keyboard** (not while typing): P B M T E S L H tools, Ctrl+Z / Ctrl+Shift+Z
+  (or Ctrl+Y), Ctrl+C / X / V and Delete for the lasso, F focus, 1 fit, 0 100%, +/− zoom, Esc closes a panel / leaves
   focus. Space-to-pan stays in `DrawingCanvas`.
 
 ## Not built yet

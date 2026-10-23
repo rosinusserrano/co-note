@@ -1,18 +1,30 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import { fade, fly } from 'svelte/transition';
-	import { updateSettings, deleteNote, ApiError, VIEW_ACCESS as ACCESS, type ViewAccess } from '$lib/notes/api';
+	import {
+		updateSettings,
+		renameNote,
+		deleteNote,
+		normalizeName,
+		ApiError,
+		VIEW_ACCESS as ACCESS,
+		type ViewAccess
+	} from '$lib/notes/api';
 	import { noteIndex, type NoteEntry } from '$lib/notes/noteIndex.svelte';
 	import { noteStore, destroyNoteData } from '$lib/notes/noteStore.svelte';
 
 	interface Props {
-		/** Must carry an ownerKey — only the creating device gets this dialog. */
+		/** Owner rights: an ownerKey on this device, or owned by the account. */
 		entry: NoteEntry;
 		onclose: () => void;
 		ondeleted: () => void;
 	}
 	let { entry, onclose, ondeleted }: Props = $props();
 
+	let name = $state(untrack(() => entry.name));
+	/** Who can draw: whoever has the editor passcode, or only the account
+	 *  the note belongs to (no passcode at all). */
+	let drawAccess = $state<'passcode' | 'private'>(untrack(() => (entry.private ? 'private' : 'passcode')));
 	let editPasscode = $state('');
 	let viewAccess = $state<ViewAccess>(untrack(() => entry.viewAccess));
 	let viewPasscode = $state('');
@@ -22,16 +34,21 @@
 	// Blank passcode fields mean "keep the current one", except when switching
 	// observers to passcode mode, where there is no current one to keep.
 	const needsViewPasscode = $derived(viewAccess === 'passcode' && entry.viewAccess !== 'passcode');
+	// Likewise opening a private note to editors.
+	const needsEditPasscode = $derived(drawAccess === 'passcode' && !!entry.private);
+	const renaming = $derived(!!name.trim() && normalizeName(name) !== entry.name);
 
 	async function save(e: SubmitEvent) {
 		e.preventDefault();
 		busy = true;
 		error = '';
 		try {
+			if (renaming) noteIndex.save(await renameNote(entry.id, name, entry.ownerKey));
 			const session = await updateSettings({
 				id: entry.id,
-				ownerKey: entry.ownerKey!,
-				editPasscode: editPasscode || undefined,
+				ownerKey: entry.ownerKey,
+				editPasscode: drawAccess === 'passcode' && editPasscode ? editPasscode : undefined,
+				private: drawAccess === 'private' && !entry.private ? true : undefined,
 				viewAccess,
 				viewPasscode: viewAccess === 'passcode' && viewPasscode ? viewPasscode : undefined
 			});
@@ -51,7 +68,7 @@
 		busy = true;
 		error = '';
 		try {
-			await deleteNote(entry.id, entry.ownerKey!);
+			await deleteNote(entry.id, entry.ownerKey);
 			noteIndex.remove(entry.id);
 			ondeleted(); // leaves the note, which disconnects it
 			await destroyNoteData(entry.id);
@@ -65,14 +82,44 @@
 <div class="backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && onclose()} transition:fade={{ duration: 160 }}>
 	<form class="dialog" onsubmit={save} transition:fly={{ y: 24, duration: 260 }}>
 		<header>
-			<span class="kicker">Owner · passcodes &amp; access</span>
+			<span class="kicker">Owner · name, passcodes &amp; access</span>
 			<h2>{entry.name}</h2>
 		</header>
 		<p class="hint">Changing a passcode disconnects everyone who joined with the old one. They'll need the new one.</p>
 		<label class="field">
-			<span class="kicker">New editor passcode</span>
-			<input class="input" type="password" bind:value={editPasscode} placeholder="Keep current" autocomplete="new-password" />
+			<span class="kicker">Name</span>
+			<input class="input" bind:value={name} autocomplete="off" autocapitalize="none" spellcheck="false" required />
+			{#if renaming}
+				<small>People join with <b class="mono">{normalizeName(name)}</b> from now on; <b class="mono">{entry.name}</b> stops working.</small>
+			{/if}
 		</label>
+		{#if entry.owned || entry.private}
+			<div class="field" role="radiogroup" aria-label="Editors">
+				<span class="kicker">Who can draw</span>
+				<div class="seg">
+					<label><input type="radio" name="settings-draw" value="passcode" bind:group={drawAccess} />Passcode</label>
+					<label><input type="radio" name="settings-draw" value="private" bind:group={drawAccess} />Only my account</label>
+				</div>
+				<small>
+					{drawAccess === 'private'
+						? 'No editor passcode: only your account opens it to draw, on any device you sign in on.'
+						: 'Anyone with the editor passcode can draw.'}
+				</small>
+			</div>
+		{/if}
+		{#if drawAccess === 'passcode'}
+			<label class="field">
+				<span class="kicker">{needsEditPasscode ? 'Editor passcode' : 'New editor passcode'}</span>
+				<input
+					class="input"
+					type="password"
+					bind:value={editPasscode}
+					placeholder={needsEditPasscode ? '' : 'Keep current'}
+					required={needsEditPasscode}
+					autocomplete="new-password"
+				/>
+			</label>
+		{/if}
 		<div class="field" role="radiogroup" aria-label="Observers">
 			<span class="kicker">Who can watch</span>
 			<div class="seg">

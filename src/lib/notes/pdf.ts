@@ -36,9 +36,53 @@ export interface PdfPageInfo {
 	vt: number[];
 }
 
+/** A bookmark in the PDF's outline and the pages it spans (0-based,
+ *  inclusive): up to the next bookmark at its level or above. */
+export interface PdfChapter {
+	title: string;
+	from: number;
+	to: number;
+	/** 0: top level, 1: inside one. */
+	depth: number;
+}
+
+const MAX_CHAPTERS = 300;
+
+/** The outline's first two levels as page spans; [] without an outline. */
+async function readChapters(doc: PDFDocumentProxy): Promise<PdfChapter[]> {
+	const found: { title: string; page: number; depth: number }[] = [];
+	const pageOf = async (dest: string | unknown[] | null) => {
+		const explicit = typeof dest === 'string' ? await doc.getDestination(dest) : dest;
+		const ref = explicit?.[0];
+		if (ref == null) return null;
+		return typeof ref === 'number' ? ref : await doc.getPageIndex(ref as never);
+	};
+	type Item = { title: string; dest: string | unknown[] | null; items: Item[] };
+	const walk = async (items: Item[], depth: number) => {
+		for (const it of items) {
+			if (found.length >= MAX_CHAPTERS) return;
+			const page = await pageOf(it.dest).catch(() => null);
+			if (page !== null && page >= 0 && page < doc.numPages)
+				found.push({ title: it.title.replace(/\s+/g, ' ').trim() || `Page ${page + 1}`, page, depth });
+			if (depth < 1 && it.items?.length) await walk(it.items, depth + 1);
+		}
+	};
+	try {
+		await walk(((await doc.getOutline()) ?? []) as Item[], 0);
+	} catch {
+		return [];
+	}
+	return found.map((c, i) => {
+		const next = found.slice(i + 1).find((n) => n.depth <= c.depth && n.page > c.page);
+		return { title: c.title, from: c.page, to: next ? next.page - 1 : doc.numPages - 1, depth: c.depth };
+	});
+}
+
 /** Page sizes (rotation and crop box applied) of a PDF, for importing it,
- *  and the ink it carries if conote exported it. */
-export async function readPdfPages(bytes: Uint8Array): Promise<{ pages: PdfPageInfo[]; conote: ConoteData | null }> {
+ *  the ink it carries if conote exported it, and its chapters. */
+export async function readPdfPages(
+	bytes: Uint8Array
+): Promise<{ pages: PdfPageInfo[]; conote: ConoteData | null; chapters: PdfChapter[] }> {
 	const doc = await open(bytes);
 	try {
 		const pages: PdfPageInfo[] = [];
@@ -54,7 +98,7 @@ export async function readPdfPages(bytes: Uint8Array): Promise<{ pages: PdfPageI
 		} catch {
 			/* unreadable: import it as a plain PDF */
 		}
-		return { pages, conote };
+		return { pages, conote, chapters: await readChapters(doc) };
 	} finally {
 		void doc.destroy();
 	}

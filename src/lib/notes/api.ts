@@ -25,6 +25,8 @@ export interface NoteSession {
 	owned?: boolean;
 	/** From the account's list: the passcode changed since; no token. */
 	locked?: boolean;
+	/** No editor passcode: only the account it belongs to opens it. */
+	private?: boolean;
 }
 
 /** What the owner key gets: an editor session plus the owner proof (see
@@ -73,11 +75,14 @@ export const normalizeName = (raw: string) => raw.trim().toLowerCase().replace(/
 
 export const createNote = (body: {
 	name: string;
-	editPasscode: string;
+	editPasscode?: string;
 	viewAccess: ViewAccess;
 	viewPasscode?: string;
+	/** Signed in only: no passcode, just this account. */
+	private?: boolean;
 }) => post<OwnerSession & { ownerKey: string }>('/notes', body);
 
+/** Signed in, an empty passcode opens a note the account already holds. */
 export const joinNote = (name: string, passcode: string) =>
 	post<NoteSession>('/join', { name, passcode });
 
@@ -93,7 +98,13 @@ export const updateSettings = (body: {
 	editPasscode?: string;
 	viewAccess?: ViewAccess;
 	viewPasscode?: string;
+	/** No editor passcode any more: only the owning account opens it. */
+	private?: boolean;
 }) => post<OwnerSession>('/owner/settings', body);
+
+/** People join with the new name from then on; devices on the note see it change. */
+export const renameNote = (id: string, name: string, ownerKey?: string) =>
+	post<OwnerSession>('/owner/rename', { id, name, ownerKey });
 
 export const deleteNote = (id: string, ownerKey?: string) =>
 	post<{ ok: true }>('/owner/delete', { id, ownerKey });
@@ -178,6 +189,10 @@ export const login = (name: string, password: string) => post<AccountSession>('/
 
 /** Every note the account holds, with fresh tokens (`at`: when it was granted). */
 export const accountNotes = () => post<{ notes: (NoteSession & { ownerProof?: string; at?: number })[] }>('/account/notes', {});
+
+/** Bring notes this device holds (tokens, and owner keys) into the account. */
+export const addToAccount = (notes: { id: string; token: string; ownerKey?: string }[]) =>
+	post<{ added: string[] }>('/account/add', { notes });
 
 export const forgetInAccount = (id: string) => post<{ ok: true }>('/account/forget', { id });
 export const getVault = () => post<{ vault: string | null }>('/account/vault', {});

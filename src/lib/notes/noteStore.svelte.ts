@@ -35,6 +35,12 @@ import { P2PLinks } from './p2p';
 import { layoutPages, contentBounds, PAGE_GAP, type PlacedPage } from './pages';
 import { getCachedFile, cacheFile, dropCachedFiles } from './files';
 import { uploadFile, downloadFile } from './api';
+import type { PdfChapter } from './pdf';
+
+/** Pages of a PDF to import, 0-based and inclusive. */
+export type PageRange = { from: number; to: number };
+/** A PDF longer than this asks which pages to take. */
+export const PICK_PAGES_FROM = 31;
 
 export type SyncStatus = 'offline' | 'connecting' | 'connected' | 'disconnected';
 /** 'revoked': the server no longer accepts our token (passcode changed).
@@ -224,6 +230,9 @@ class NoteStore {
 	access = $state<Access>('ok');
 	/** Where the note's paper lives in Zotero, if it came from there or was saved there. */
 	zotero = $state<ZoteroLink | null>(null);
+	/** The name the server last gave the note (it writes it into meta on a
+	 *  rename), or '' if never renamed. */
+	name = $state('');
 	/** Other sessions on this note (not us). Replaced wholesale on change. */
 	presence = $state.raw<Presence[]>([]);
 	/** The latest pull from the owner (only the owner's connection can send
@@ -603,6 +612,7 @@ class NoteStore {
 		this.hub = false;
 		this.pages = [];
 		this.zotero = null;
+		this.name = '';
 		this.layout = 'vertical';
 		this.revision++; // repaint the now-empty canvas
 	}
@@ -651,6 +661,22 @@ class NoteStore {
 		});
 	}
 
+	/** Remove the items `remove` (strokes and text boxes, by id) and add
+	 *  `strokes` / `texts`, as one undo step: a lasso move, cut or paste.
+	 *  Items are immutable, so a moved one comes back under a new id. */
+	replaceItems(remove: Set<string>, strokes: Stroke[], texts: TextBox[]) {
+		const arr = this.#arr;
+		const boxes = this.#texts;
+		if (!arr || !boxes || !this.#doc) return;
+		if (remove.size + strokes.length + texts.length === 0) return;
+		this.beginChange();
+		this.#doc.transact(() => {
+			this.removeStrokes(remove);
+			if (strokes.length > 0) arr.push(strokes);
+			if (texts.length > 0) boxes.push(texts);
+		});
+	}
+
 	/** Clear all ink and text. */
 	clear() {
 		const arr = this.#arr;
@@ -693,8 +719,16 @@ class NoteStore {
 	 * pdf.js first, so a broken or locked PDF fails here rather than on every
 	 * device that opens the note. Throws ApiError / Error with a message for
 	 * the user. One undo step.
+	 *
+	 * A long PDF (`PICK_PAGES_FROM` pages or more) asks `choose` which pages
+	 * to take (0-based, inclusive): a chapter, say. `null` cancels. The whole
+	 * file is uploaded either way; the pages keep their index into it, so
+	 * export and link previews still find everything.
 	 */
-	async importPdf(file: Blob): Promise<{ conote: boolean }> {
+	async importPdf(
+		file: Blob,
+		choose?: (pdf: { count: number; chapters: PdfChapter[] }) => Promise<PageRange | null>
+	): Promise<{ conote: boolean; cancelled?: true }> {
 		const doc = this.#doc;
 		if (!doc) return { conote: false };
 		const id = this.id;
@@ -707,6 +741,13 @@ class NoteStore {
 			const name = (e as { name?: string })?.name;
 			throw new Error(name === 'PasswordException' ? 'That PDF is password-protected.' : "That file couldn't be read as a PDF.");
 		}
+		let range: PageRange = { from: 0, to: info.pages.length - 1 };
+		if (choose && info.pages.length >= PICK_PAGES_FROM) {
+			const picked = await choose({ count: info.pages.length, chapters: info.chapters });
+			if (!picked) return { conote: false, cancelled: true };
+			range = picked;
+		}
+		const keep = (index: number) => index >= range.from && index <= range.to;
 		const hash = await uploadFile(id, this.#token, bytes);
 		await cacheFile(id, hash, bytes);
 		if (this.#doc !== doc) return { conote: false }; // switched notes meanwhile
@@ -716,7 +757,7 @@ class NoteStore {
 		// A PDF conote exported: its pages as they were (added ones beside
 		// their page), and its ink back as strokes.
 		const conote = info.conote;
-		const ids = info.pages.map(() => uid());
+		const ids = info.pages.map((_, index) => (keep(index) ? uid() : ''));
 		this.beginChange();
 		doc.transact(() => {
 			// The first pages go below (or beside) any ink already there, not over it.
@@ -731,20 +772,22 @@ class NoteStore {
 			}
 			if (conote && pages.length === 0) meta.set('layout', conote.layout);
 			pages.push(
-				info.pages.map((p, index) => ({
-					id: ids[index],
-					w: p.w,
-					h: p.h,
-					extra: index > 0 && !!conote?.pages[index].extra,
-					pdf: { file: hash, index, vt: p.vt }
-				}))
+				info.pages.flatMap((p, index) =>
+					keep(index)
+						? [{
+								id: ids[index],
+								w: p.w,
+								h: p.h,
+								extra: index > range.from && !!conote?.pages[index].extra,
+								pdf: { file: hash, index, vt: p.vt }
+							}]
+						: []
+				)
 			);
-			if (conote && conote.strokes.length > 0) {
-				arr.push(conote.strokes.map((s) => ({ ...s, id: uid(), page: ids[s.page] })));
-			}
-			if (conote && conote.texts.length > 0) {
-				this.#texts!.push(conote.texts.map((t) => ({ ...t, id: uid(), page: ids[t.page] })));
-			}
+			const strokes = conote?.strokes.filter((s) => keep(s.page)) ?? [];
+			if (strokes.length > 0) arr.push(strokes.map((s) => ({ ...s, id: uid(), page: ids[s.page] })));
+			const texts = conote?.texts.filter((t) => keep(t.page)) ?? [];
+			if (texts.length > 0) this.#texts!.push(texts.map((t) => ({ ...t, id: uid(), page: ids[t.page] })));
 		});
 		return { conote: conote !== null };
 	}
@@ -804,6 +847,8 @@ class NoteStore {
 		const origin = this.#meta?.get('origin') as { x: number; y: number } | undefined;
 		this.layout = layout;
 		this.zotero = readZoteroLink(this.#meta?.get('zotero'));
+		const name = this.#meta?.get('name');
+		this.name = typeof name === 'string' && /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/.test(name) ? name : '';
 		this.pages = layoutPages(
 			this.#pages?.toArray() ?? [],
 			layout,

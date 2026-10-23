@@ -3,9 +3,11 @@
 	import { fly, scale } from 'svelte/transition';
 	import DrawingCanvas from './DrawingCanvas.svelte';
 	import NoteSettings from './NoteSettings.svelte';
+	import PagePicker from './PagePicker.svelte';
 	import Icon, { type IconName } from './Icon.svelte';
 	import ZoteroConnect from './ZoteroConnect.svelte';
-	import { noteStore, destroyNoteData } from '$lib/notes/noteStore.svelte';
+	import { noteStore, destroyNoteData, type PageRange } from '$lib/notes/noteStore.svelte';
+	import type { PdfChapter } from '$lib/notes/pdf';
 	import { noteIndex, myName, isOwner, type NoteEntry } from '$lib/notes/noteIndex.svelte';
 	import { account } from '$lib/notes/account.svelte';
 	import {
@@ -73,13 +75,14 @@
 	const color = $derived(inks[brush].color);
 	const strokeWidth = $derived(inks[brush].width);
 
-	type Tool = Ink | 'eraser' | 'laser' | 'hand';
+	type Tool = Ink | 'eraser' | 'laser' | 'hand' | 'lasso';
 	const TOOLS: { id: Tool; icon: IconName; label: string; key: string; hint?: string }[] = [
 		{ id: 'pen', icon: 'pen', label: 'Pen', key: 'P' },
 		{ id: 'brush', icon: 'brush', label: 'Brush', key: 'B' },
 		{ id: 'marker', icon: 'marker', label: 'Marker', key: 'M' },
 		{ id: 'text', icon: 'text', label: 'Text', key: 'T', hint: 'tap to type, tap a text to change it' },
 		{ id: 'eraser', icon: 'eraser', label: 'Eraser', key: 'E' },
+		{ id: 'lasso', icon: 'lasso', label: 'Lasso', key: 'S', hint: 'circle ink to move, copy or delete it; tap to paste' },
 		{ id: 'laser', icon: 'laser', label: 'Laser', key: 'L', hint: 'hold to point, everyone sees a fading trail' },
 		{ id: 'hand', icon: 'hand', label: 'Hand', key: 'H', hint: 'drag to move around (or hold Space)' }
 	];
@@ -200,6 +203,26 @@
 		}
 	}
 
+	/** The dot grid on pages too, to line geometry up with. Per device, remembered. */
+	const PAGE_DOTS_KEY = 'conote:pageDots';
+	let pageDots = $state(
+		(() => {
+			try {
+				return localStorage.getItem(PAGE_DOTS_KEY) === '1';
+			} catch {
+				return false;
+			}
+		})()
+	);
+	function togglePageDots() {
+		pageDots = !pageDots;
+		try {
+			localStorage.setItem(PAGE_DOTS_KEY, pageDots ? '1' : '0');
+		} catch {
+			/* not remembered, still on for this session */
+		}
+	}
+
 	// --- Fingers: draw (phones) or move the view (tablets with a pen) ----------
 
 	/** Per device, remembered. Unset = automatic: fingers draw until a pen
@@ -265,6 +288,8 @@
 	const penButtonUse = $derived(
 		penButton === 'off' ? null : { tool: penButton, color: inks.marker.color, width: inks.marker.width }
 	);
+	/** What the pen last sent on touching down (shown under the setting). */
+	let penTouch = $state('');
 	function setPenButton(b: PenButton) {
 		penButton = b;
 		writeLocal(PEN_BUTTON_KEY, b);
@@ -491,6 +516,19 @@
 	};
 	let pdfError = $state('');
 
+	/** A long PDF asks which pages to take (PagePicker); the import waits. */
+	let pagePick = $state.raw<{ count: number; chapters: PdfChapter[]; done: (r: PageRange | null) => void } | null>(null);
+	const choosePages = (pdf: { count: number; chapters: PdfChapter[] }) =>
+		new Promise<PageRange | null>((resolve) => {
+			pagePick = {
+				...pdf,
+				done: (r) => {
+					pagePick = null;
+					resolve(r);
+				}
+			};
+		});
+
 	async function importPdf(e: Event) {
 		const input = e.currentTarget as HTMLInputElement;
 		const file = input.files?.[0];
@@ -500,9 +538,9 @@
 		pdfError = '';
 		const hadPages = noteStore.pages.length > 0;
 		try {
-			await noteStore.importPdf(file);
+			const { cancelled } = await noteStore.importPdf(file, choosePages);
 			// Show the new pages: the whole thing on a first import.
-			if (!hadPages) {
+			if (!hadPages && !cancelled) {
 				follow = null;
 				fit();
 			}
@@ -596,7 +634,8 @@
 		const hadPages = noteStore.pages.length > 0;
 		try {
 			const bytes = await zoteroFile(z, pdf.key);
-			const { conote } = await noteStore.importPdf(new Blob([bytes.slice()], { type: 'application/pdf' }));
+			const { conote, cancelled } = await noteStore.importPdf(new Blob([bytes.slice()], { type: 'application/pdf' }), choosePages);
+			if (cancelled) return;
 			// Remember where it came from, so saving goes back to that item —
 			// replacing this very attachment if it's one conote saved before.
 			if (!noteStore.zotero || noteStore.zotero.library !== z.userId) {
@@ -700,6 +739,13 @@
 		}
 	}
 
+	// Renamed by the owner (the server writes the name into the doc): this
+	// device's list, title and share link follow.
+	$effect(() => {
+		const name = noteStore.name;
+		if (name) untrack(() => noteIndex.rename(entry.id, name));
+	});
+
 	// The creator's device can always get back in by itself.
 	$effect(() => {
 		if (noteStore.access === 'revoked' && owner) untrack(() => rejoin());
@@ -750,7 +796,7 @@
 	}
 
 	function onKey(e: KeyboardEvent) {
-		if (typing(e) || showSettings) return;
+		if (typing(e) || showSettings || pagePick) return;
 		const mod = e.ctrlKey || e.metaKey;
 		const k = e.key.toLowerCase();
 		if (mod && canEdit && !focus && (k === 'z' || k === 'y')) {
@@ -779,6 +825,35 @@
 			if (t) pickTool(t.id);
 		}
 	}
+
+	// A tap on the canvas while a panel is open only closes the panel: it
+	// mustn't also draw there. Captured on the way down, before the canvas
+	// sees it, and the rest of that pointer (and fingers joining it) with it.
+	const swallowed = new Set<number>();
+	function closeFirst(e: PointerEvent) {
+		if (e.isPrimary) swallowed.clear(); // a new contact: earlier ones are over
+		const t = e.target as Element | null;
+		if (!t?.closest?.('.stage')) return;
+		if (pop && !t.closest('[data-pop]')) pop = '';
+		else if (swallowed.size === 0) return;
+		swallowed.add(e.pointerId);
+		e.stopPropagation();
+		e.preventDefault();
+	}
+	function swallowRest(e: PointerEvent) {
+		if (!swallowed.has(e.pointerId)) return;
+		if (e.type !== 'pointermove') swallowed.delete(e.pointerId);
+		e.stopPropagation();
+	}
+	onMount(() => {
+		const opts = { capture: true };
+		window.addEventListener('pointerdown', closeFirst, opts);
+		for (const type of ['pointermove', 'pointerup', 'pointercancel'] as const) window.addEventListener(type, swallowRest, opts);
+		return () => {
+			window.removeEventListener('pointerdown', closeFirst, opts);
+			for (const type of ['pointermove', 'pointerup', 'pointercancel'] as const) window.removeEventListener(type, swallowRest, opts);
+		};
+	});
 
 	function onWindowPointerDown(e: PointerEvent) {
 		if (focus) revealFocusBar();
@@ -1025,6 +1100,7 @@
 			{strokeWidth}
 			showPresence={showOthers}
 			showViews={!focus}
+			{pageDots}
 			bind:width={canvasWidth}
 			bind:height={canvasHeight}
 			onnavigate={() => (follow = null)}
@@ -1037,6 +1113,7 @@
 			{fingerInks}
 			onpen={onPen}
 			penButton={penButtonUse}
+			onpentouch={(info) => (penTouch = info)}
 		/>
 	</main>
 
@@ -1383,7 +1460,14 @@
 						</button>
 					</div>
 					<p class="fine">
-						{#if entry.viewAccess === 'open'}
+						{#if entry.private}
+							{entry.viewAccess === 'open'
+								? 'Anyone with the link can watch.'
+								: entry.viewAccess === 'passcode'
+									? 'Observers need the observer passcode to watch.'
+									: 'Private: only your account opens it, on any device you sign in on.'}
+							Nobody else can draw until you give it an editor passcode (⋯ → Name, passcodes &amp; access).
+						{:else if entry.viewAccess === 'open'}
 							Anyone with the link can watch. Send the editor passcode separately to people who should draw.
 						{:else if entry.viewAccess === 'none'}
 							Only editors can join. Send the editor passcode separately.
@@ -1553,6 +1637,9 @@
 					<button class="item" onclick={toggleSnap} title="When scrolling stops, glide to the nearest page edge (this device only)">
 						<Icon name="magnet" size={18} /><span>Snap to pages</span><span class="kicker" class:lit={snap}>{snap ? 'on' : 'off'}</span>
 					</button>
+					<button class="item" onclick={togglePageDots} title="Show the dot grid on the pages too, to line things up (this device only, not exported)">
+						<Icon name="dots" size={18} /><span>Dots on pages</span><span class="kicker" class:lit={pageDots}>{pageDots ? 'on' : 'off'}</span>
+					</button>
 				{/if}
 				<span class="kicker sect">Screen</span>
 				<button class="item" onclick={() => setCustomizing(true)} title="Move the bars to other edges and corners, join them, tuck them away (this device)">
@@ -1586,6 +1673,11 @@
 							{/each}
 						</span>
 					</div>
+					{#if penTouch}
+						<p class="fine kicker pentouch" title="What the pen sent the last time it touched down: button 2 / buttons 2 or 3 is the side button, 5 / 32 the eraser end">
+							Last pen touch: {penTouch}
+						</p>
+					{/if}
 					<button class="item" onclick={() => (mode = mode === 'draw' ? 'observe' : 'draw')} title="Look only: pen and mouse move the view instead of drawing">
 						<Icon name="eye" size={18} /><span>Look only</span><span class="kicker" class:lit={mode === 'observe'}
 							>{mode === 'observe' ? 'on' : 'off'}</span
@@ -1611,11 +1703,11 @@
 							pop = '';
 						}}
 					>
-						<Icon name="sliders" size={18} /><span>Passcodes &amp; access</span>
+						<Icon name="sliders" size={18} /><span>Name, passcodes &amp; access</span>
 					</button>
 				{/if}
 				<p class="fine kicker keys">
-					{#if canEdit}<span>P B M E L H — tools · Ctrl Z — undo</span>{/if}
+					{#if canEdit}<span>P B M T E S L H — tools · Ctrl Z — undo</span>{/if}
 					<span>F — focus · 1 — fit · 0 — 100% · ± — zoom</span>
 				</p>
 				<p class="fine kicker build">conote · build {__BUILD_ID__}</p>
@@ -1709,7 +1801,7 @@
 				<button class="mini" onclick={toggleFinger}>Fingers draw</button>
 			</div>
 		{/if}
-		{#if pdfBusy}
+		{#if pdfBusy && !pagePick}
 			<div class="notice" role="status" transition:fly={{ y: -12, duration: 220 }}>
 				<span class="spinner"></span>
 				<span>{BUSY_TEXT[pdfBusy]}</span>
@@ -1755,6 +1847,9 @@
 	</div>
 </div>
 
+{#if pagePick}
+	<PagePicker count={pagePick.count} chapters={pagePick.chapters} ondone={pagePick.done} />
+{/if}
 {#if showSettings && owner}
 	<NoteSettings {entry} onclose={() => (showSettings = false)} ondeleted={onleave} />
 {/if}
@@ -2339,9 +2434,9 @@
 		.rail:not(.col) {
 			gap: 1px;
 		}
-		/* ten buttons share what's left of the width */
+		/* eleven buttons share what's left of the width */
 		.rail:not(.col) :is(.tool, .ink) {
-			width: clamp(24px, calc((100vw - 92px) / 10), 36px);
+			width: clamp(22px, calc((100vw - 92px) / 11), 36px);
 			min-width: 0;
 			height: 42px;
 			border-radius: 12px;

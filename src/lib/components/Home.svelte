@@ -29,8 +29,27 @@
 	// A shared link lands on Join; a bare visit most likely wants a new note.
 	let tab = $state<'join' | 'create' | 'account'>(untrack(() => (joinName ? 'join' : 'create')));
 
-	// What the account holds joins this device's list (fresh tokens too).
-	onMount(() => void account.sync());
+	// This device's list is the account's (fresh tokens too): on arrival, on
+	// coming back to the app, and now and then while it's open, so a note
+	// made on another device shows up here.
+	const SYNC_EVERY_MS = 60_000;
+	onMount(() => {
+		let last = 0;
+		const sync = () => {
+			if (document.hidden || Date.now() - last < 10_000) return;
+			last = Date.now();
+			void account.sync();
+		};
+		sync();
+		const timer = setInterval(sync, SYNC_EVERY_MS);
+		document.addEventListener('visibilitychange', sync);
+		window.addEventListener('focus', sync);
+		return () => {
+			clearInterval(timer);
+			document.removeEventListener('visibilitychange', sync);
+			window.removeEventListener('focus', sync);
+		};
+	});
 	// A new version doesn't reload over a half-filled form.
 	onMount(() =>
 		appUpdate.block(
@@ -95,6 +114,8 @@
 	let me = $state(myName());
 	let createForm = $state({
 		name: '',
+		/** Signed in: no passcodes, only this account opens it. */
+		private: false,
 		editPasscode: '',
 		viewAccess: 'passcode' as ViewAccess,
 		viewPasscode: '',
@@ -109,6 +130,12 @@
 		joinForm.busy = true;
 		joinForm.error = '';
 		try {
+			// Already on this device (from the account, say): no passcode needed.
+			const known = !joinForm.passcode && noteIndex.notes.find((n) => n.name === normalizeName(joinForm.name) && n.token);
+			if (known) {
+				setMyName(me);
+				return onopen(known.id);
+			}
 			const session = await joinNote(joinForm.name, joinForm.passcode);
 			setMyName(me);
 			onopen(noteIndex.save(session, via()).id);
@@ -125,12 +152,12 @@
 		createForm.error = '';
 		try {
 			const { name, editPasscode, viewAccess, viewPasscode } = createForm;
-			const session = await createNote({
-				name,
-				editPasscode,
-				viewAccess,
-				viewPasscode: viewAccess === 'passcode' ? viewPasscode : undefined
-			});
+			const only = createForm.private && account.signedIn;
+			const session = await createNote(
+				only
+					? { name, private: true, viewAccess: 'none' }
+					: { name, editPasscode, viewAccess, viewPasscode: viewAccess === 'passcode' ? viewPasscode : undefined }
+			);
 			setMyName(me);
 			onopen(noteIndex.save(session, via()).id);
 		} catch (err) {
@@ -142,7 +169,7 @@
 
 	async function forget(n: NoteEntry) {
 		if (n.owned) {
-			alert(`"${n.name}" belongs to your account. To get rid of it, delete it in its settings (⋯ → Passcodes & access).`);
+			alert(`"${n.name}" belongs to your account. To get rid of it, delete it in its settings (⋯ → Name, passcodes & access).`);
 			return;
 		}
 		const inAccount = !!n.via && n.via === account.name;
@@ -224,6 +251,7 @@
 									<span class="nm">{n.name}</span>
 									<span class="leader"></span>
 									{#if n.saved === false}<span class="unsaved kicker" title="Not in anyone's account: it ends when everyone leaves">unsaved</span>{/if}
+									{#if n.private}<span class="private kicker" title="No passcode: only your account opens it">private</span>{/if}
 									<span class="role kicker" data-role={isOwner(n) ? 'owner' : n.role}>{roleLabel(n)}</span>
 									<span class="when kicker">{ago(n.openedAt)}</span>
 								</button>
@@ -373,7 +401,11 @@
 					<label class="field">
 						<span class="kicker">Passcode</span>
 						<input class="input" type="password" bind:value={joinForm.passcode} autocomplete="off" />
-						<small>The editor or observer passcode you were given. Leave it empty if the note lets anyone watch.</small>
+						<small>
+							The editor or observer passcode you were given. Leave it empty if the note lets anyone watch{account.signedIn
+								? ', or if your account already has it'
+								: ''}.
+						</small>
 					</label>
 					{@render yourName()}
 					{#if joinForm.error}<p class="error-text">{joinForm.error}</p>{/if}
@@ -391,26 +423,42 @@
 							<small>People join with <b class="mono">{normalizeName(createForm.name)}</b></small>
 						{/if}
 					</label>
-					<label class="field">
-						<span class="kicker">Editor passcode</span>
-						<input class="input" type="password" bind:value={createForm.editPasscode} autocomplete="new-password" required />
-						<small>Anyone with this can draw.</small>
-					</label>
-					<div class="field" role="radiogroup" aria-label="Observers">
-						<span class="kicker">Who can watch</span>
-						<div class="seg">
-							{#each ACCESS as a (a.value)}
-								<label><input type="radio" name="access" value={a.value} bind:group={createForm.viewAccess} />{a.label}</label>
-							{/each}
+					{#if account.signedIn}
+						<div class="field" role="radiogroup" aria-label="Who can open it">
+							<span class="kicker">Who can open it</span>
+							<div class="seg">
+								<label><input type="radio" name="who" value={false} bind:group={createForm.private} />With a passcode</label>
+								<label><input type="radio" name="who" value={true} bind:group={createForm.private} />Only my account</label>
+							</div>
+							<small>
+								{createForm.private
+									? `No passcodes: it opens on any device signed in as ${account.name}. You can add passcodes later to share it.`
+									: 'Others join with the name and a passcode.'}
+							</small>
 						</div>
-						<small>{ACCESS.find((a) => a.value === createForm.viewAccess)?.hint}</small>
-					</div>
-					{#if createForm.viewAccess === 'passcode'}
+					{/if}
+					{#if !(createForm.private && account.signedIn)}
 						<label class="field">
-							<span class="kicker">Observer passcode</span>
-							<input class="input" type="password" bind:value={createForm.viewPasscode} autocomplete="new-password" required />
-							<small>Anyone with this can watch, not draw.</small>
+							<span class="kicker">Editor passcode</span>
+							<input class="input" type="password" bind:value={createForm.editPasscode} autocomplete="new-password" required />
+							<small>Anyone with this can draw.</small>
 						</label>
+						<div class="field" role="radiogroup" aria-label="Observers">
+							<span class="kicker">Who can watch</span>
+							<div class="seg">
+								{#each ACCESS as a (a.value)}
+									<label><input type="radio" name="access" value={a.value} bind:group={createForm.viewAccess} />{a.label}</label>
+								{/each}
+							</div>
+							<small>{ACCESS.find((a) => a.value === createForm.viewAccess)?.hint}</small>
+						</div>
+						{#if createForm.viewAccess === 'passcode'}
+							<label class="field">
+								<span class="kicker">Observer passcode</span>
+								<input class="input" type="password" bind:value={createForm.viewPasscode} autocomplete="new-password" required />
+								<small>Anyone with this can watch, not draw.</small>
+							</label>
+						{/if}
 					{/if}
 					{@render yourName()}
 					{#if createForm.error}<p class="error-text">{createForm.error}</p>{/if}
@@ -759,6 +807,10 @@
 	.unsaved {
 		flex: none;
 		color: #9a5b12;
+	}
+	.private {
+		flex: none;
+		color: var(--graphite);
 	}
 
 	/* --- My notes: a table of contents ------------------------------------------ */

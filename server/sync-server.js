@@ -115,6 +115,19 @@ function saveRoom(id, room) {
 	}
 }
 
+/** Put a note's (new) name in its doc's meta, so devices on it, or opening
+ *  it later, show the name it's joined by. */
+function stampName(id, name) {
+	const room = rooms.get(id);
+	if (room) return void room.doc.getMap('meta').set('name', name);
+	const doc = new Y.Doc();
+	const saved = registry.loadDoc(id);
+	if (saved) Y.applyUpdate(doc, saved);
+	doc.getMap('meta').set('name', name);
+	registry.saveDoc(id, Y.encodeStateAsUpdate(doc));
+	doc.destroy();
+}
+
 function send(ws, msg) {
 	if (ws.readyState !== WS_OPEN) return;
 	try {
@@ -429,6 +442,7 @@ const routes = {
 	'/api/account/register': ['register', (body) => registry.register(body)],
 	'/api/account/login': ['login', (body) => registry.login(body)],
 	'/api/account/notes': ['account', signedIn((account) => registry.accountNotes(account))],
+	'/api/account/add': ['account', signedIn((account, body) => registry.addToAccount(account, body))],
 	'/api/account/forget': ['account', signedIn((account, body) => registry.forget(account, body))],
 	'/api/account/vault': ['account', signedIn((account) => registry.getVault(account))],
 	'/api/account/vault/set': ['account', signedIn((account, body) => registry.setVault(account, body))],
@@ -440,6 +454,11 @@ const routes = {
 	'/api/owner/settings': ['owner', async (body, account) => {
 		const { revoked, session } = await registry.updateSettings(body, account);
 		closeConnections(session.id, revoked, CLOSE_UNAUTHORIZED);
+		return session;
+	}],
+	'/api/owner/rename': ['owner', async (body, account) => {
+		const session = await registry.renameNote(body, account);
+		stampName(session.id, session.name);
 		return session;
 	}],
 	'/api/owner/delete': ['owner', async (body, account) => {

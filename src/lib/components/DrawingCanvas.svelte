@@ -8,15 +8,17 @@
 	import type { Brush } from '$lib/notes/model';
 	import { pageAt, PAGE_GAP, type PlacedPage } from '$lib/notes/pages';
 	import type { PageRenderer, PdfLink } from '$lib/notes/pdf';
+	import { clipboard, copyItems, itemIds, itemsBounds, itemsById, lassoed, place, type Items } from '$lib/notes/selection';
+	import Icon from './Icon.svelte';
 
 	interface Props {
 		viewport: Viewport;
 		/** 'draw' allows pen/mouse to ink; 'observe' is view-only (still pans/zooms). */
 		mode?: 'draw' | 'observe';
 		/** Active tool for pen/mouse input: a brush, the eraser, the laser
-		 *  pointer, the hand (drags the view around), or text (a tap places or
-		 *  edits a text box). */
-		tool?: Brush | 'eraser' | 'laser' | 'hand' | 'text';
+		 *  pointer, the hand (drags the view around), text (a tap places or
+		 *  edits a text box), or the lasso (select, move, copy, paste). */
+		tool?: Brush | 'eraser' | 'laser' | 'hand' | 'text' | 'lasso';
 		color?: string;
 		/** A brush's width; with the text tool, the font size. */
 		strokeWidth?: number;
@@ -24,6 +26,8 @@
 		showPresence?: boolean;
 		/** With presence on: their visible areas too, not just cursors. */
 		showViews?: boolean;
+		/** The dot grid on pages too, not just around them (a drawing aid). */
+		pageDots?: boolean;
 		/** The canvas's size in CSS pixels — the screen the viewport maps onto. */
 		width?: number;
 		height?: number;
@@ -44,6 +48,9 @@
 		/** What a pen does while its barrel button is held as it touches down
 		 *  (null: nothing special). A pen's eraser end always erases. */
 		penButton?: PenUse | null;
+		/** What the last pen contact reported (button / buttons): shown next to
+		 *  the pen-button setting, to see what a pen actually sends. */
+		onpentouch?: (info: string) => void;
 	}
 
 	type Tool = NonNullable<Props['tool']>;
@@ -58,6 +65,7 @@
 		strokeWidth = 2.5,
 		showPresence = true,
 		showViews = true,
+		pageDots = false,
 		width = $bindable(0),
 		height = $bindable(0),
 		onnavigate,
@@ -66,7 +74,8 @@
 		onactive,
 		fingerInks = false,
 		onpen,
-		penButton = null
+		penButton = null,
+		onpentouch
 	}: Props = $props();
 
 	// The desk around the pages: warm paper with a dot grid. Pages stay white
@@ -111,9 +120,6 @@
 	const PULL_MIN_MS = 500;
 	const PULL_MS_PER_EFOLD = 480;
 	const PULL_MAX_MS = 2300;
-	// …and its speed: full at the start and end, easing down to this fraction
-	// of that at the turn (the widest point), never stopping there.
-	const PULL_TURN_SPEED = 0.35;
 
 	let canvas: HTMLCanvasElement;
 	let ctx: CanvasRenderingContext2D | null = null;
@@ -262,7 +268,10 @@
 		const pages = new Map(noteStore.pages.map((p) => [p.id, p]));
 		const byPage = new Map<string, Stroke[]>();
 		const target = (s: Stroke) => (isMarker(s) ? markerLayer : c);
+		// A selection being dragged is drawn where it's going instead (drawMoving).
+		const lifted = moving ? selection?.ids : undefined;
 		for (const s of noteStore.strokes) {
+			if (lifted?.has(s.id)) continue;
 			if (!s.page) drawShape(target(s), s.color, inkShape(s));
 			else if (pages.has(s.page)) {
 				let list = byPage.get(s.page);
@@ -281,7 +290,7 @@
 		// Text on top of the ink; the one being edited is the editor's to show.
 		const hidden = editing?.id;
 		for (const t of noteStore.texts) {
-			if (t.id === hidden) continue;
+			if (t.id === hidden || lifted?.has(t.id)) continue;
 			if (!t.page) drawText(c, t);
 			else {
 				const page = pages.get(t.page);
@@ -354,6 +363,20 @@
 		c.setTransform(1, 0, 0, 1, 0, 0);
 		c.fillStyle = pattern;
 		c.fillRect(0, 0, canvas.width, canvas.height);
+	}
+
+	/** The same dots over the pages (under the ink): something to line
+	 *  geometry up with. Only on screen, never exported. */
+	function drawPageDots(c: CanvasRenderingContext2D) {
+		const pages = noteStore.pages;
+		if (pages.length === 0) return;
+		c.save();
+		setWorldTransform(c);
+		c.beginPath();
+		for (const p of pages) c.rect(p.x, p.y, p.w, p.h);
+		c.clip();
+		drawGrid(c);
+		c.restore();
 	}
 
 	/** Pages: a white sheet with a hairline edge and a soft shadow, then the
@@ -594,6 +617,7 @@
 			ctx.fillRect(0, 0, canvas.width, canvas.height);
 			drawGrid(ctx);
 			drawPages(ctx);
+			if (pageDots) drawPageDots(ctx);
 			// Markers: translucent, multiplied onto paper/PDF, under the other ink.
 			ctx.setTransform(1, 0, 0, 1, 0, 0);
 			ctx.globalCompositeOperation = 'multiply';
@@ -601,12 +625,15 @@
 			ctx.drawImage(markers, 0, 0);
 			if (liveStroke && isMarker(liveStroke)) drawLive(ctx);
 			drawOthersLive(ctx, true);
+			drawMoving(ctx, true);
 			ctx.globalCompositeOperation = 'source-over';
 			ctx.globalAlpha = 1;
 			ctx.setTransform(1, 0, 0, 1, 0, 0);
 			ctx.drawImage(base, 0, 0);
 			drawOthersLive(ctx, false);
+			drawMoving(ctx, false);
 			if (liveStroke && !isMarker(liveStroke)) drawLive(ctx);
+			drawSelection(ctx);
 			if (showPresence && noteStore.presence.length > 0) drawPresence(ctx, noteStore.presence);
 			// Lasers show even with "Others" off: pointing is meant to be seen.
 			if (trails.size > 0) drawLasers(ctx);
@@ -642,6 +669,7 @@
 		void noteStore.liveRevision;
 		void showPresence;
 		void showViews;
+		void pageDots;
 		markDirty();
 	});
 
@@ -837,6 +865,226 @@
 		});
 	});
 
+	// --- Lasso: select, move, copy, paste ---------------------------------------
+
+	/** The loop being drawn (world points). */
+	let lassoPointerId: number | null = null;
+	let lassoLoop: { x: number; y: number }[] = [];
+	/** What the lasso holds: ids in the doc, their world copies, and bounds. */
+	let selection = $state.raw<{ ids: Set<string>; items: Items; box: Box } | null>(null);
+	/** Dragging the selection: where the drag began (world) and how far it went. */
+	let movePointerId: number | null = null;
+	let moving = $state(false);
+	let moveFrom: { x: number; y: number } | null = null;
+	let moveBy = { x: 0, y: 0 };
+	/** A tap with the lasso and something copied: offer to paste there (world). */
+	let pasteAt = $state<{ x: number; y: number } | null>(null);
+	/** The pointer is over the selection (cursor), and where it last was (Ctrl+V). */
+	let overSelection = $state(false);
+	let pointerWorld: { x: number; y: number } | null = null;
+	let copied = $state(false);
+	let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+	const SEL_PAD = 6;
+
+	/** The selection's frame on screen (padded; moved along while dragging). */
+	function selRect() {
+		if (!selection) return null;
+		const d = moving ? moveBy : { x: 0, y: 0 };
+		const a = viewport.toScreen(selection.box.x0 + d.x, selection.box.y0 + d.y);
+		const b = viewport.toScreen(selection.box.x1 + d.x, selection.box.y1 + d.y);
+		return { x: a.x - SEL_PAD, y: a.y - SEL_PAD, w: b.x - a.x + 2 * SEL_PAD, h: b.y - a.y + 2 * SEL_PAD };
+	}
+
+	const inRect = (r: { x: number; y: number; w: number; h: number } | null, at: { x: number; y: number }) =>
+		!!r && at.x >= r.x && at.x <= r.x + r.w && at.y >= r.y && at.y <= r.y + r.h;
+
+	function select(items: Items | null) {
+		const box = items && itemsBounds(items);
+		selection = items && box ? { ids: itemIds(items), items, box } : null;
+		if (!selection) overSelection = false;
+		markDirty();
+	}
+
+	/** The selection being dragged, where it's going (markers or the rest). */
+	function drawMoving(c: CanvasRenderingContext2D, markersPass: boolean) {
+		if (!moving || !selection) return;
+		setWorldTransform(c);
+		c.translate(moveBy.x, moveBy.y);
+		for (const s of selection.items.strokes) if (isMarker(s) === markersPass) drawShape(c, s.color, inkShape(s));
+		if (!markersPass) for (const t of selection.items.texts) drawText(c, t);
+	}
+
+	/** The lasso loop while drawn, then the selection's frame. */
+	function drawSelection(c: CanvasRenderingContext2D) {
+		c.setTransform(dpr, 0, 0, dpr, 0, 0);
+		c.lineWidth = 1.5;
+		c.strokeStyle = 'rgba(25,24,20,0.75)';
+		c.fillStyle = 'rgba(214,242,75,0.16)';
+		c.setLineDash([5, 4]);
+		if (lassoPointerId !== null && lassoLoop.length > 1) {
+			c.beginPath();
+			lassoLoop.forEach((p, i) => {
+				const s = viewport.toScreen(p.x, p.y);
+				if (i === 0) c.moveTo(s.x, s.y);
+				else c.lineTo(s.x, s.y);
+			});
+			c.closePath();
+			c.fill();
+			c.stroke();
+		} else if (selection) {
+			const r = selRect()!;
+			roundRect(c, r.x, r.y, r.w, r.h, 6);
+			c.fill();
+			c.stroke();
+		}
+		c.setLineDash([]);
+	}
+
+	function startLasso(e: PointerEvent) {
+		const at = local(e);
+		const w = viewport.toWorld(at.x, at.y);
+		onactive?.(true);
+		if (inRect(selRect(), at)) {
+			movePointerId = e.pointerId;
+			moving = true;
+			moveFrom = w;
+			moveBy = { x: 0, y: 0 };
+			baseDirty = true; // the selection leaves the base layer while it moves
+			markDirty();
+			return;
+		}
+		select(null);
+		lassoPointerId = e.pointerId;
+		lassoLoop = [w];
+		markDirty();
+	}
+
+	function endLasso() {
+		const loop = lassoLoop;
+		lassoPointerId = null;
+		lassoLoop = [];
+		onactive?.(false);
+		markDirty();
+		const xs = loop.map((p) => p.x);
+		const ys = loop.map((p) => p.y);
+		const extent = (Math.max(...xs) - Math.min(...xs) + Math.max(...ys) - Math.min(...ys)) * viewport.scale;
+		if (extent < 8) {
+			// A tap: put down what was copied, here (after a confirming tap).
+			if (clipboard()) pasteAt = loop[0];
+			return;
+		}
+		select(lassoed(loop, noteStore.strokes, noteStore.texts, noteStore.pages));
+	}
+
+	/** Drop the dragged selection where it is now: one undo step. */
+	function endMove(commit = true) {
+		const d = moveBy;
+		movePointerId = null;
+		moving = false;
+		moveFrom = null;
+		moveBy = { x: 0, y: 0 };
+		onactive?.(false);
+		baseDirty = true;
+		markDirty();
+		if (!commit || !selection || Math.hypot(d.x, d.y) * viewport.scale < 1) return;
+		const moved = place(selection.items, d.x, d.y, noteStore.pages);
+		noteStore.replaceItems(selection.ids, moved.strokes, moved.texts);
+		select(itemsById(itemIds(moved), noteStore.strokes, noteStore.texts, noteStore.pages));
+	}
+
+	function cancelLasso() {
+		if (lassoPointerId !== null) {
+			lassoPointerId = null;
+			lassoLoop = [];
+			onactive?.(false);
+			markDirty();
+		}
+		if (movePointerId !== null) endMove(false);
+	}
+
+	function copySelection() {
+		if (!selection) return;
+		copyItems(selection.items);
+		copied = true;
+		if (copiedTimer) clearTimeout(copiedTimer);
+		copiedTimer = setTimeout(() => (copied = false), 1200);
+	}
+
+	function deleteSelection() {
+		if (!selection) return;
+		noteStore.replaceItems(selection.ids, [], []);
+		select(null);
+	}
+
+	function cutSelection() {
+		copySelection();
+		deleteSelection();
+	}
+
+	/** Put down what was copied, centred on `at` (world); with the lasso,
+	 *  it's then selected, ready to move. */
+	function paste(at: { x: number; y: number }) {
+		const clip = clipboard();
+		const box = clip && itemsBounds(clip);
+		pasteAt = null;
+		if (!clip || !box) return;
+		const items = place(clip, at.x - (box.x0 + box.x1) / 2, at.y - (box.y0 + box.y1) / 2, noteStore.pages);
+		noteStore.replaceItems(new Set(), items.strokes, items.texts);
+		if (tool === 'lasso') select(itemsById(itemIds(items), noteStore.strokes, noteStore.texts, noteStore.pages));
+	}
+
+	/** Ctrl+C / X / V, Delete, Esc. */
+	function onSelectionKey(e: KeyboardEvent) {
+		const t = e.target as HTMLElement | null;
+		if (mode !== 'draw' || (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable))) return;
+		const mod = e.ctrlKey || e.metaKey;
+		const k = e.key.toLowerCase();
+		if (mod && !e.shiftKey && !e.altKey && k === 'v' && clipboard()) {
+			e.preventDefault();
+			return paste(pointerWorld ?? viewport.toWorld(width / 2, height / 2));
+		}
+		if (!selection || moving) return;
+		if (mod && k === 'c') {
+			e.preventDefault();
+			copySelection();
+		} else if (mod && k === 'x') {
+			e.preventDefault();
+			cutSelection();
+		} else if (!mod && (e.key === 'Delete' || e.key === 'Backspace')) {
+			e.preventDefault();
+			deleteSelection();
+		} else if (e.key === 'Escape') select(null);
+	}
+
+	// The doc changed (undo, someone erasing, the layout): the selection is
+	// whatever of it is still there, wherever that is now.
+	$effect(() => {
+		void noteStore.revision;
+		untrack(() => {
+			if (selection && !moving) select(itemsById(selection.ids, noteStore.strokes, noteStore.texts, noteStore.pages));
+		});
+	});
+	// Another tool, or a session that can't draw: nothing selected.
+	$effect(() => {
+		if (tool !== 'lasso' || mode !== 'draw')
+			untrack(() => {
+				cancelLasso();
+				select(null);
+				pasteAt = null;
+			});
+	});
+
+	/** Where the selection's buttons go: above its frame, or below without room. */
+	const selBar = $derived.by(() => {
+		if (!selection || moving || tool !== 'lasso') return null;
+		void viewport.scale;
+		void viewport.offset;
+		const r = selRect()!;
+		const top = r.y - 48 >= 8 ? r.y - 48 : Math.min(r.y + r.h + 8, height - 48);
+		return { left: Math.max(110, Math.min(r.x + r.w / 2, width - 110)), top };
+	});
+	const pastePos = $derived(pasteAt && viewport.toScreen(pasteAt.x, pasteAt.y));
+
 	// --- Pages -------------------------------------------------------------
 
 	// pdf.js is loaded only once the note has PDF pages, and torn down with it.
@@ -1024,7 +1272,8 @@
 
 	/** A stroke, erase or laser is under way: the view holds still until it
 	 *  ends, or every sample after a move would land somewhere else. */
-	const inking = () => drawingPointerId !== null || erasePointerId !== null || laserPointerId !== null;
+	const inking = () =>
+		drawingPointerId !== null || erasePointerId !== null || laserPointerId !== null || lassoPointerId !== null || movePointerId !== null;
 
 	/** A touch to ignore: the hand holding the pen, not a finger meaning to
 	 *  pan or zoom. */
@@ -1032,7 +1281,8 @@
 		return inking() || performance.now() - penSeenAt < PEN_GRACE_MS || Math.max(e.width, e.height) > PALM_PX;
 	}
 
-	const inkPointer = (id: number) => id === drawingPointerId || id === erasePointerId || id === laserPointerId;
+	const inkPointer = (id: number) =>
+		id === drawingPointerId || id === erasePointerId || id === laserPointerId || id === lassoPointerId || id === movePointerId;
 
 	function sawPen() {
 		penSeenAt = performance.now();
@@ -1077,7 +1327,7 @@
 			onactive?.(false);
 			laserOff('self');
 			noteStore.setPresence({ laser: false });
-		}
+		} else if (first === lassoPointerId || first === movePointerId) cancelLasso();
 		touchInk = null;
 		touchInkAt = null;
 		touches.set(first, at);
@@ -1096,10 +1346,22 @@
 		pinched = false;
 	}
 
-	function onPointerDown(e: PointerEvent) {
+	/** Pens differ in when they tell about their barrel button: with the
+	 *  touch-down (Windows Ink, most Android), only while hovering just before
+	 *  it, or a moment after it (seen on S Pens). All three count. */
+	const BARREL_HOVER_MS = 250;
+	const BARREL_LATE_MS = 250;
+	let barrelSeenAt = -Infinity;
+	/** The stroke in progress is the barrel's (or eraser end's), not the tool's. */
+	let strokeByButton = false;
+	const barrelIn = (e: PointerEvent) => e.button === 2 || (e.buttons & 2) !== 0;
+
+	function onPointerDown(e: PointerEvent, late?: PenUse) {
+		if (late) return startInk(e, late, true);
 		measure(); // the canvas can move (banners above it) without resizing
 		tapFrom = local(e);
 		hoverLink(null);
+		pasteAt = null;
 		if (e.pointerType === 'pen') sawPen();
 		const finger = e.pointerType === 'touch';
 		if (finger) {
@@ -1126,7 +1388,14 @@
 		// button; its eraser end, button 5. Both are a pen contact, not a
 		// right-click — the barrel only when it's been given something to do.
 		const pen = e.pointerType === 'pen';
+		if (pen) onpentouch?.(`button ${e.button} · buttons ${e.buttons}${use.tool !== tool ? ` → ${use.tool}` : ''}`);
 		const contact = e.button === 0 || (pen && e.button === 5) || (pen && e.button === 2 && penButton !== null);
+		startInk(e, use, contact);
+	}
+
+	function startInk(e: PointerEvent, use: PenUse, contact: boolean) {
+		const finger = e.pointerType === 'touch';
+		strokeByButton = use.tool !== tool;
 		// Drag to move: the hand tool, Space held, the middle button, or any
 		// drag when this session can't draw anyway.
 		if (use.tool === 'hand' || spaceHeld || e.button === 1 || mode !== 'draw') {
@@ -1158,6 +1427,7 @@
 			touchInk = e.pointerId;
 			touchInkAt = local(e);
 		}
+		if (use.tool === 'lasso') return startLasso(e);
 		if (use.tool === 'laser') {
 			laserPointerId = e.pointerId;
 			onactive?.(true);
@@ -1209,9 +1479,21 @@
 	function useFor(e: PointerEvent): PenUse {
 		if (e.pointerType === 'pen') {
 			if (e.button === 5 || e.buttons & 32) return { tool: 'eraser', color, width: strokeWidth };
-			if (penButton && (e.button === 2 || e.buttons & 2)) return penButton;
+			if (penButton && (barrelIn(e) || performance.now() - barrelSeenAt < BARREL_HOVER_MS)) return penButton;
 		}
 		return { tool, color, width: strokeWidth };
+	}
+
+	/** A barrel or eraser end reported only after the pen touched down: the
+	 *  young stroke was meant for the button, so it starts over as that. */
+	function lateButton(e: PointerEvent) {
+		if (strokeByButton || e.pointerType !== 'pen' || performance.now() - inkStartedAt > BARREL_LATE_MS) return false;
+		const use = e.buttons & 32 ? { tool: 'eraser' as Tool, color, width: strokeWidth } : penButton && barrelIn(e) ? penButton : null;
+		if (!use) return false;
+		abortStroke();
+		onpentouch?.(`button ${e.button} · buttons ${e.buttons} (late) → ${use.tool}`);
+		onPointerDown(e, use);
+		return true;
 	}
 
 	function onPointerMove(e: PointerEvent) {
@@ -1227,8 +1509,14 @@
 		// Pen/mouse, drawing or hovering: that's our cursor for the others
 		// (while drawing it rides along with the live stroke instead).
 		const here = local(e);
-		if (e.buttons === 0) hoverLink(here);
-		if (e.pointerId !== drawingPointerId) publishCursor(viewport.toWorld(here.x, here.y));
+		pointerWorld = viewport.toWorld(here.x, here.y);
+		if (e.pointerType === 'pen' && barrelIn(e)) barrelSeenAt = performance.now();
+		if (e.pointerId === drawingPointerId && lateButton(e)) return;
+		if (e.buttons === 0) {
+			hoverLink(here);
+			overSelection = tool === 'lasso' && inRect(selRect(), here);
+		}
+		if (e.pointerId !== drawingPointerId) publishCursor(pointerWorld);
 		if (e.pointerId === panPointerId && panLast) {
 			viewport.panBy(here.x - panLast.x, here.y - panLast.y);
 			panLast = here;
@@ -1241,6 +1529,21 @@
 				const w = viewport.toWorld(at.x, at.y);
 				laserTo('self', w.x, w.y);
 			}
+			return;
+		}
+		if (e.pointerId === lassoPointerId) {
+			for (const ev of e.getCoalescedEvents?.() ?? [e]) {
+				const at = local(ev);
+				const w = viewport.toWorld(at.x, at.y);
+				const last = lassoLoop[lassoLoop.length - 1];
+				if (Math.hypot(w.x - last.x, w.y - last.y) * viewport.scale >= 2) lassoLoop.push(w);
+			}
+			markDirty();
+			return;
+		}
+		if (e.pointerId === movePointerId && moveFrom) {
+			moveBy = { x: pointerWorld.x - moveFrom.x, y: pointerWorld.y - moveFrom.y };
+			markDirty();
 			return;
 		}
 		if (e.pointerId === erasePointerId) {
@@ -1310,6 +1613,8 @@
 			markDirty();
 			return;
 		}
+		if (e.pointerId === lassoPointerId) return endLasso();
+		if (e.pointerId === movePointerId) return endMove(e.type !== 'pointercancel');
 		if (e.pointerId !== drawingPointerId) return;
 		if (liveStroke && liveStroke.points.length > 0) {
 			// End exactly where the pen lifted, even if that sample was too close to keep.
@@ -1333,6 +1638,7 @@
 
 	function onPointerLeave(e: PointerEvent) {
 		if (e.pointerType !== 'touch' && e.pointerId !== drawingPointerId) publishCursor(null);
+		if (!inkPointer(e.pointerId)) pointerWorld = null;
 		hoverLink(null);
 	}
 
@@ -1508,6 +1814,8 @@
 		drawingPointerId !== null ||
 		erasePointerId !== null ||
 		laserPointerId !== null ||
+		lassoPointerId !== null ||
+		movePointerId !== null ||
 		panPointerId !== null ||
 		touches.size > 0;
 
@@ -1516,12 +1824,14 @@
 	 * centred. Waits if a stroke or gesture is under way: moving the view
 	 * under a pen mid-stroke would kink the line.
 	 *
-	 * The camera never slides: the screen's edges first move outward until both
-	 * where we are and where we're going are in sight, then inward onto the
-	 * target. Each half is a zoom about one fixed world point (the first inside
-	 * the current view, the second inside the target), so whatever you were
-	 * looking at stays put while the target comes into view, and the farther
-	 * the jump, the farther out the way there goes.
+	 * The way there is an arc, like something thrown: the zoom (log of the
+	 * view's width) is a parabola in time, out and back in, peaking where
+	 * both where we are and where we're going are in sight (`outerView`).
+	 * The position eases along the straight line between the two centres,
+	 * slow at the start and end and fastest in the middle — its speed goes
+	 * with how far out the view is, so on screen it never races. A target
+	 * inside the view (or around it) makes the parabola's top fall on an end:
+	 * a plain zoom in (or out), no detour.
 	 */
 	export function showView(view: { x: number; y: number; w: number; h: number }) {
 		if (width <= 0 || height <= 0) return;
@@ -1534,35 +1844,13 @@
 		const to = framing({ x0: view.x, y0: view.y, x1: view.x + view.w, y1: view.y + view.h }, width, height);
 		const from = viewport.visible(width, height);
 		const target = { x: -to.offset.x / to.scale, y: -to.offset.y / to.scale, w: width / to.scale, h: height / to.scale };
-		const over = outerView(from, target);
-		const out = Math.log(over.w / from.w); // zoom out, in e-folds
-		const back = Math.log(over.w / target.w); // zoom in
-		const total = out + back;
-		if (total < 1e-4 && Math.abs(target.x - from.x) * to.scale < 0.5 && Math.abs(target.y - from.y) * to.scale < 0.5) return;
-		const duration = Math.min(PULL_MAX_MS, PULL_MIN_MS + PULL_MS_PER_EFOLD * total);
-		// Each half gets its share of the time by how much it zooms (log width),
-		// so both run at the same pace. Fast at the start and end, slowing (not
-		// stopping) toward the turn: `slowing` is the progress through a half
-		// whose speed falls smoothly from full to PULL_TURN_SPEED.
-		const split = total < 1e-4 ? 1 : out / total;
-		const q = PULL_TURN_SPEED;
-		const slowing = (x: number) => (q * x + ((1 - q) * (x + Math.sin(Math.PI * x) / Math.PI)) / 2) / ((1 + q) / 2);
-		const speeding = (x: number) => 1 - slowing(1 - x);
-		// A move with no turn (one half only) slows in its middle instead.
-		const whole = (k: number) => (k < 0.5 ? slowing(2 * k) / 2 : 1 - slowing(2 - 2 * k) / 2);
+		const path = arc(from, target, outerView(from, target).w);
+		if (path.efolds < 1e-4 && Math.abs(target.x - from.x) * to.scale < 0.5 && Math.abs(target.y - from.y) * to.scale < 0.5) return;
+		const duration = Math.min(PULL_MAX_MS, PULL_MIN_MS + PULL_MS_PER_EFOLD * path.efolds);
 		const t0 = performance.now();
 		const step = (t: number) => {
 			const k = Math.min(1, (t - t0) / duration);
-			const r =
-				total < 1e-4
-					? zoomBetween(from, target, whole(k))
-					: split >= 1
-						? zoomBetween(from, over, whole(k))
-						: split <= 0
-							? zoomBetween(over, target, whole(k))
-							: k < split
-								? zoomBetween(from, over, slowing(k / split))
-								: zoomBetween(over, target, speeding((k - split) / (1 - split)));
+			const r = path.at(k);
 			viewport.scale = width / r.w;
 			viewport.offset = { x: -r.x * viewport.scale, y: -r.y * viewport.scale };
 			glide = k < 1 ? requestAnimationFrame(step) : 0;
@@ -1587,17 +1875,49 @@
 	}
 
 	/**
-	 * Fraction `t` of the way from rect `a` to rect `b` (same shape) as one zoom
-	 * about the world point both share on screen: the width changes
-	 * geometrically, and each edge moves only one way. Equal sizes (no such
-	 * point) degrade to a straight slide.
+	 * The arc from rect `a` to rect `b` (same shape), widest at `peak` (never
+	 * narrower than either end). `at(k)`, k in 0..1 of the time: the log
+	 * width is L(k) = La + (Lb − La)·k + 4h·k(1 − k), with h set so the
+	 * parabola's top is log(peak); the centre's progress is the running
+	 * share of width × sin(πk), so it starts and stops gently and goes
+	 * fastest while far out. `efolds`: zoom travelled, out and back.
 	 */
-	function zoomBetween(a: Rect, b: Rect, t: number): Rect {
-		const s = b.w / a.w;
-		const f = s ** t;
-		// (1 - f) / (1 - s) → t as s → 1; the fixed point's share of the move.
-		const g = Math.abs(Math.log(s)) < 1e-6 ? t : (1 - f) / (1 - s);
-		return { x: a.x * f + (b.x - s * a.x) * g, y: a.y * f + (b.y - s * a.y) * g, w: a.w * f, h: a.h * f };
+	function arc(a: Rect, b: Rect, peak: number) {
+		const la = Math.log(a.w);
+		const lb = Math.log(b.w);
+		const slope = lb - la;
+		const top = Math.max(Math.log(peak), la, lb);
+		const d = top - la; // ≥ 0, and d − slope = top − lb ≥ 0
+		// From top = la + (slope + 4h)² / 16h, the root whose vertex lies in [0, 1].
+		const h = Math.max(0, (d - slope / 2 + Math.sqrt(Math.max(0, d * (d - slope)))) / 2);
+		const logWidth = (k: number) => la + slope * k + 4 * h * k * (1 - k);
+		// Cumulative position progress, tabulated (trapezoids).
+		const N = 240;
+		const run = new Float64Array(N + 1);
+		for (let i = 1; i <= N; i++) {
+			const w = (k: number) => Math.exp(logWidth(k)) * Math.sin(Math.PI * k);
+			run[i] = run[i - 1] + (w((i - 1) / N) + w(i / N)) / 2;
+		}
+		const progress = (k: number) => {
+			if (run[N] <= 0) return k;
+			const x = k * N;
+			const i = Math.min(N - 1, Math.floor(x));
+			return (run[i] + (run[i + 1] - run[i]) * (x - i)) / run[N];
+		};
+		const ca = { x: a.x + a.w / 2, y: a.y + a.h / 2 };
+		const cb = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
+		const aspect = a.h / a.w;
+		return {
+			efolds: d + (top - lb),
+			at(k: number): Rect {
+				if (k >= 1) return b;
+				const p = progress(k);
+				const w = Math.exp(logWidth(k));
+				const cx = ca.x + (cb.x - ca.x) * p;
+				const cy = ca.y + (cb.y - ca.y) * p;
+				return { x: cx - w / 2, y: cy - (w * aspect) / 2, w, h: w * aspect };
+			}
+		};
 	}
 
 	// --- Following something (the whole drawing, another device's view) ------
@@ -1664,7 +1984,12 @@
 	}
 </script>
 
-<svelte:window onkeydown={onKey} onkeyup={onKey} onblur={() => (spaceHeld = false)} />
+<svelte:window
+	onkeydown={(e) => {
+		onKey(e);
+		onSelectionKey(e);
+	}}
+	onkeyup={onKey} onblur={() => (spaceHeld = false)} />
 
 <div class="surface">
 	<canvas
@@ -1676,8 +2001,29 @@
 		onpointerleave={onPointerLeave}
 		onauxclick={(e) => e.preventDefault()}
 		oncontextmenu={(e) => e.preventDefault()}
-		data-cursor={panning ? 'grabbing' : tool === 'hand' || spaceHeld || mode !== 'draw' ? 'grab' : tool}
+		data-cursor={panning
+			? 'grabbing'
+			: tool === 'hand' || spaceHeld || mode !== 'draw'
+				? 'grab'
+				: tool === 'lasso' && (moving || overSelection)
+					? 'move'
+					: tool}
 	></canvas>
+	{#if selBar}
+		<div class="selbar" style:left="{selBar.left}px" style:top="{selBar.top}px">
+			<button onclick={copySelection} title="Copy (Ctrl+C) — tap with the lasso to paste">
+				<Icon name={copied ? 'check' : 'copy'} size={16} />{copied ? 'Copied' : 'Copy'}
+			</button>
+			<button onclick={cutSelection} title="Cut (Ctrl+X)"><Icon name="scissors" size={16} />Cut</button>
+			<button onclick={deleteSelection} title="Delete (Del)"><Icon name="trash" size={16} />Delete</button>
+		</div>
+	{/if}
+	{#if pasteAt && pastePos}
+		{@const at = pasteAt}
+		<div class="selbar" style:left="{Math.max(60, Math.min(pastePos.x, width - 60))}px" style:top="{Math.max(8, pastePos.y - 52)}px">
+			<button onclick={() => paste(at)} title="Paste here (Ctrl+V)"><Icon name="paste" size={16} />Paste</button>
+		</div>
+	{/if}
 	{#if cite && citePos}
 		<div
 			class="cite"
@@ -1757,6 +2103,34 @@
 	}
 	canvas[data-cursor='grabbing'] {
 		cursor: grabbing;
+	}
+	canvas[data-cursor='move'] {
+		cursor: move;
+	}
+	.selbar {
+		position: absolute;
+		transform: translateX(-50%);
+		display: flex;
+		gap: 2px;
+		padding: 4px;
+		border-radius: 999px;
+		background: var(--ink);
+		box-shadow: var(--shadow-float);
+	}
+	.selbar button {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 7px 12px 7px 10px;
+		border: 0;
+		border-radius: 999px;
+		background: none;
+		color: var(--paper);
+		font: 500 0.82rem var(--f-sans);
+		cursor: pointer;
+	}
+	.selbar button:hover {
+		background: rgb(255 255 255 / 0.12);
 	}
 	canvas[data-cursor='text'] {
 		cursor: text;

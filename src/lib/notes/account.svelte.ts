@@ -1,6 +1,8 @@
 // The optional account: name + password. Signed in, this device's notes
-// list also holds everything the account holds (fetched from the server, with
-// fresh tokens), and whatever is created or joined is kept in the account.
+// list is the account's: everything the account holds (fetched from the
+// server, with fresh tokens), whatever is created or joined is kept in it,
+// notes this device had before signing in move into it, and notes deleted or
+// removed from it on another device leave this one too.
 // Without one, everything works as before, but notes created here end when
 // everyone leaves them.
 //
@@ -16,6 +18,7 @@ import {
 	login,
 	register,
 	accountNotes,
+	addToAccount,
 	getVault,
 	setVault,
 	setAccountSession,
@@ -23,7 +26,7 @@ import {
 	type AccountSession
 } from './api';
 import { noteIndex } from './noteIndex.svelte';
-import { destroyNoteData } from './noteStore.svelte';
+import { destroyNoteData, noteStore } from './noteStore.svelte';
 import { zotero, validZotero, type ZoteroSettings } from './zotero.svelte';
 import { deriveVaultKey, open, seal, vaultAvailable } from './vault';
 
@@ -74,14 +77,29 @@ class Account {
 		}
 	}
 
-	/** Pull the account's notes into this device's list. */
+	/** Make this device's list the account's: push what only this device has,
+	 *  pull everything the account holds, drop what it no longer does. */
 	async sync() {
 		if (!this.signedIn) return;
+		const name = this.name;
 		try {
+			const mine = noteIndex.notes.filter((n) => !n.via && n.token);
+			for (let i = 0; i < mine.length; i += 50) {
+				const batch = mine.slice(i, i + 50).map((n) => ({ id: n.id, token: n.token, ownerKey: n.ownerKey }));
+				await addToAccount(batch);
+			}
 			const { notes } = await accountNotes();
+			if (name !== this.name) return; // signed out or in as someone else meanwhile
+			const held = new Set(notes.map((n) => n.id));
 			for (const n of notes) {
 				const prev = noteIndex.get(n.id);
-				noteIndex.save(n, { via: this.name, openedAt: prev?.openedAt ?? n.at ?? Date.now() });
+				noteIndex.save(n, { via: name, openedAt: prev?.openedAt ?? n.at ?? Date.now() });
+			}
+			// Deleted, or removed from the account elsewhere. A note that ended
+			// (unsaved) stays: its last copy is only here.
+			for (const n of noteIndex.notes.filter((n) => n.via === name && !held.has(n.id) && n.saved !== false && n.id !== noteStore.id)) {
+				noteIndex.remove(n.id);
+				await destroyNoteData(n.id);
 			}
 		} catch (e) {
 			if (e instanceof SignedOutError) return await this.signOut();

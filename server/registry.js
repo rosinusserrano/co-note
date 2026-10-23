@@ -14,6 +14,10 @@
 // sync-server.js), whoever else joined. Notes from before accounts are
 // 'legacy': kept, until their owner claims them into an account.
 //
+// A note can also be *private*: no editor passcode at all, so only the
+// account it belongs to opens it (on any of its devices), by name or from
+// its list. The owner can give it a passcode later, or take it away again.
+//
 // Everything lives in one data directory (CONOTE_DATA):
 //   secret      HMAC key for tokens (generated on first start)
 //   notes.json  the registry
@@ -202,6 +206,7 @@ function session(note, role, extra = {}) {
 		viewAccess: note.viewAccess,
 		token: tokenFor(note, role),
 		saved: note.keep !== 'none',
+		private: note.edit === null,
 		...extra
 	};
 }
@@ -227,11 +232,13 @@ function checkViewSettings(viewAccess, viewPasscode, editPasscode, name) {
 		throw new HttpError(400, 'Observer and editor passcodes must differ.');
 }
 
-export async function createNote({ name, editPasscode, viewAccess = 'passcode', viewPasscode }, account = null) {
+export async function createNote({ name, editPasscode, viewAccess = 'passcode', viewPasscode, private: only }, account = null) {
 	name = normalizeName(name);
-	const err = nameError(name) ?? passcodeError(editPasscode, 'Editor passcode', name);
+	if (only && !account) throw new HttpError(400, 'Sign in to make a note only your account can open.');
+	const err = nameError(name) ?? (only ? null : passcodeError(editPasscode, 'Editor passcode', name));
 	if (err) throw new HttpError(400, err);
-	checkViewSettings(viewAccess, viewPasscode, editPasscode, name);
+	if (only) viewAccess = 'none';
+	else checkViewSettings(viewAccess, viewPasscode, editPasscode, name);
 	if (notes.size >= MAX_NOTES) throw new HttpError(503, 'This server is full.');
 
 	const ownerKey = randomBytes(18).toString('base64url');
@@ -240,7 +247,7 @@ export async function createNote({ name, editPasscode, viewAccess = 'passcode', 
 		name,
 		createdAt: Date.now(),
 		owner: await hash(ownerKey),
-		edit: await hash(editPasscode),
+		edit: only ? null : await hash(editPasscode), // null: private, no passcode opens it
 		viewAccess,
 		view: viewAccess === 'passcode' ? await hash(viewPasscode) : null,
 		epoch: { edit: 1, view: 1 },
@@ -260,18 +267,28 @@ export async function createNote({ name, editPasscode, viewAccess = 'passcode', 
 const WRONG = 'Wrong note name or passcode.';
 
 /** Exchange a passcode for a token. An unknown name and a wrong passcode get
- *  the same answer, so this can't be used to probe which names exist. */
+ *  the same answer, so this can't be used to probe which names exist.
+ *  Signed in, no passcode is needed for a note the account already holds
+ *  (its own, private ones included). */
 export async function join({ name, passcode }, account = null) {
 	const note = notes.get(byName.get(normalizeName(name)) ?? '');
 	if (!note) {
 		await hash('timing'); // keep "no such note" as slow as a wrong passcode
 		throw new HttpError(403, WRONG);
 	}
+	if (account && !passcode) {
+		if (note.account === account.key) return ownerSessionOf(note, { owned: true });
+		const g = account.notes[note.id];
+		if (g && String(note.epoch[g.role]) === String(g.epoch)) return session(note, g.role);
+	}
 	let role = null;
 	if (await matches(passcode, note.edit)) role = 'edit';
 	else if (note.viewAccess === 'passcode' && (await matches(passcode, note.view))) role = 'view';
 	else if (note.viewAccess === 'open' && !passcode) role = 'view';
-	if (!role) throw new HttpError(403, WRONG);
+	if (!role) {
+		if (!passcode) await hash('timing'); // matches() returns at once on an empty one
+		throw new HttpError(403, WRONG);
+	}
 	if (account) grant(account, note, role);
 	return session(note, role);
 }
@@ -297,8 +314,11 @@ export async function ownerSession({ id, ownerKey }, account = null) {
  * connections) and a fresh edit session for the owner, whose own token may be
  * among the revoked.
  */
-export async function updateSettings({ id, ownerKey, editPasscode, viewAccess, viewPasscode }, account = null) {
+export async function updateSettings({ id, ownerKey, editPasscode, viewAccess, viewPasscode, private: only }, account = null) {
 	const note = await asOwner(id, ownerKey, account);
+	// Private needs an account to open it: the one the note belongs to.
+	if (only && !note.account) throw new HttpError(400, 'Keep the note in your account first.');
+	if (only && editPasscode) throw new HttpError(400, 'A private note has no editor passcode.');
 	const nextAccess = viewAccess ?? note.viewAccess;
 	if (!VIEW_ACCESS.includes(nextAccess)) throw new HttpError(400, 'Unknown observer setting.');
 
@@ -329,13 +349,29 @@ export async function updateSettings({ id, ownerKey, editPasscode, viewAccess, v
 		note.epoch.view++;
 		revoked.push('view');
 	}
-	if (editPasscode) {
-		note.edit = await hash(editPasscode);
+	if (editPasscode || (only && note.edit !== null)) {
+		note.edit = editPasscode ? await hash(editPasscode) : null;
 		note.epoch.edit++;
 		revoked.push('edit');
 	}
 	saveRegistry();
 	return { revoked, session: ownerSessionOf(note, { owned: !!account && note.account === account.key }) };
+}
+
+/** A new name: people join with it from now on, and the old one is free. */
+export async function renameNote({ id, ownerKey, name }, account = null) {
+	const note = await asOwner(id, ownerKey, account);
+	name = normalizeName(name);
+	const err = nameError(name);
+	if (err) throw new HttpError(400, err);
+	if (name !== note.name) {
+		if (byName.has(name)) throw new HttpError(409, 'That name is taken. Pick another.');
+		byName.delete(note.name);
+		note.name = name;
+		byName.set(name, note.id);
+		saveRegistry();
+	}
+	return ownerSessionOf(note, { owned: !!account && note.account === account.key });
 }
 
 function removeNote(note) {
@@ -466,6 +502,27 @@ export function accountNotes(account) {
 	}
 	if (changed) saveAccounts();
 	return { notes: out };
+}
+
+/** A device signing in brings the notes it already had (by their tokens)
+ *  into the account, so every device signed in lists the same. Notes it
+ *  created signed out (owner key, no account yet) become the account's: kept. */
+export async function addToAccount(account, { notes: list }) {
+	if (!Array.isArray(list) || list.length > 200) throw new HttpError(400, 'Malformed list.');
+	const added = [];
+	for (const it of list) {
+		const v = verifyToken(it?.token);
+		if (!v || v.note.id !== it.id) continue;
+		const note = v.note;
+		if (!note.account && typeof it.ownerKey === 'string' && (await matches(it.ownerKey, note.owner))) {
+			note.keep = 'account';
+			note.account = account.key;
+			saveRegistry();
+		}
+		grant(account, note, note.account === account.key ? 'edit' : v.role);
+		added.push(note.id);
+	}
+	return { added };
 }
 
 export function forget(account, { id }) {
