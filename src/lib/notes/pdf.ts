@@ -214,6 +214,8 @@ export class PageRenderer {
 		st.lastUsed = performance.now();
 		const bm = st.bitmap;
 		if (bm) ctx.drawImage(bm.canvas, page.x + bm.rx, page.y + bm.ry, bm.rw, bm.rh);
+		// A view gone wrong (NaN, an empty page) asks for nothing.
+		if (!(px > 0) || !Number.isFinite(px) || ![visible.x, visible.y, visible.w, visible.h].every(Number.isFinite)) return bm !== null;
 
 		const covers =
 			bm !== null &&
@@ -268,9 +270,13 @@ export class PageRenderer {
 			if (!oc) this.#oc.set(page.pdf.file, (oc = withoutConoteInk(doc).catch(() => null)));
 			const config = await oc;
 			const pp = await doc.getPage(page.pdf.index + 1);
+			const w = Math.ceil(t.rw * t.scale);
+			const h = Math.ceil(t.rh * t.scale);
+			// A 0×0 canvas makes drawImage throw on every later frame.
+			if (!Number.isFinite(w) || !Number.isFinite(h) || ![t.rx, t.ry].every(Number.isFinite)) return;
 			const canvas = document.createElement('canvas');
-			canvas.width = Math.max(1, Math.ceil(t.rw * t.scale));
-			canvas.height = Math.max(1, Math.ceil(t.rh * t.scale));
+			canvas.width = Math.max(1, w);
+			canvas.height = Math.max(1, h);
 			const ctx = canvas.getContext('2d');
 			if (!ctx) return;
 			await pp.render({

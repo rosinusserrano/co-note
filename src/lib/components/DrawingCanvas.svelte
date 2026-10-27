@@ -94,6 +94,9 @@
 		/** Our stroke in progress on its own low-latency layer (see `inkLayer`);
 		 *  off: drawn with everything else, as before. */
 		fastInk?: boolean;
+		/** Gestures don't zoom: a pinch only pans, Ctrl+wheel (a trackpad
+		 *  pinch) does nothing. The zoom buttons and keys still work. */
+		zoomLock?: boolean;
 	}
 
 	type Tool = NonNullable<Props['tool']>;
@@ -121,6 +124,7 @@
 		onpentouch,
 		onpenstats,
 		fastInk = true,
+		zoomLock = false,
 		shapeKind = 'rect',
 		coverTaps = false,
 		openCovers = true,
@@ -830,6 +834,9 @@
 	}
 
 	function render(now: number) {
+		// Next frame first: whatever this one throws, the canvas keeps drawing
+		// (one bad bitmap once froze it on a stale frame, input and all).
+		raf = requestAnimationFrame(render);
 		stepTrack(now);
 		if (stats && drawingPointerId !== null) {
 			if (stats.lastFrame) {
@@ -903,7 +910,6 @@
 				ctx.stroke();
 			}
 		}
-		raf = requestAnimationFrame(render);
 	}
 	let raf = 0;
 
@@ -2212,7 +2218,7 @@
 		const now = centroidAndDist();
 		if (pinchPrev) {
 			viewport.panBy(now.cx - pinchPrev.cx, now.cy - pinchPrev.cy);
-			if (pinchPrev.dist > 0) viewport.zoomAt(now.cx, now.cy, now.dist / pinchPrev.dist);
+			if (pinchPrev.dist > 0 && !zoomLock) viewport.zoomAt(now.cx, now.cy, now.dist / pinchPrev.dist);
 			onnavigate?.();
 		}
 		pinchPrev = now;
@@ -2230,6 +2236,7 @@
 		let dx = e.deltaX * unit;
 		let dy = e.deltaY * unit;
 		if (e.ctrlKey) {
+			if (zoomLock) return;
 			const at = local(e);
 			// A mouse notch is ~100, a pinch step a few: clamp so a notch is a step.
 			viewport.zoomAt(at.x, at.y, Math.exp(-Math.max(-25, Math.min(25, dy)) * 0.01));
@@ -2385,10 +2392,15 @@
 		const duration = Math.min(PULL_MAX_MS, PULL_MIN_MS + PULL_MS_PER_EFOLD * path.efolds);
 		const t0 = performance.now();
 		const step = (t: number) => {
-			const k = Math.min(1, (t - t0) / duration);
+			// A frame's timestamp can be from before t0 (the pull came in mid-frame
+			// on a busy device): k < 0 read the arc's table at −1, the view became
+			// NaN, and the screen went blank for good. Seen on the user's tablet.
+			const k = Math.min(1, Math.max(0, (t - t0) / duration));
 			const r = path.at(k);
-			viewport.scale = width / r.w;
-			viewport.offset = { x: -r.x * viewport.scale, y: -r.y * viewport.scale };
+			if ([r.x, r.y, r.w].every(Number.isFinite) && r.w > 0) {
+				viewport.scale = width / r.w;
+				viewport.offset = { x: -r.x * viewport.scale, y: -r.y * viewport.scale };
+			}
 			glide = k < 1 ? requestAnimationFrame(step) : 0;
 		};
 		glide = requestAnimationFrame(step);
@@ -2435,8 +2447,8 @@
 			run[i] = run[i - 1] + (w((i - 1) / N) + w(i / N)) / 2;
 		}
 		const progress = (k: number) => {
-			if (run[N] <= 0) return k;
-			const x = k * N;
+			if (!(run[N] > 0) || !Number.isFinite(run[N])) return k;
+			const x = Math.min(N, Math.max(0, k * N));
 			const i = Math.min(N - 1, Math.floor(x));
 			return (run[i] + (run[i + 1] - run[i]) * (x - i)) / run[N];
 		};
@@ -2511,7 +2523,7 @@
 		const t0 = performance.now();
 		const DURATION = 260;
 		const step = (t: number) => {
-			const k = Math.min(1, (t - t0) / DURATION);
+			const k = Math.min(1, Math.max(0, (t - t0) / DURATION)); // see showView
 			const e = 1 - (1 - k) ** 3;
 			viewport.offset = { x: from.x + (to.x - from.x) * e, y: from.y + (to.y - from.y) * e };
 			glide = k < 1 ? requestAnimationFrame(step) : 0;

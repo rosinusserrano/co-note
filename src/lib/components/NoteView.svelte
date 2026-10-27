@@ -159,6 +159,16 @@
 		inks[p.brush] = { color: p.color, width: p.width };
 		pickTool(p.brush);
 	}
+	/** The saved inks' strip beside the rail is out. Per device, remembered. */
+	const SAVED_OPEN_KEY = 'conote:savedOpen';
+	let savedOpen = $state(readLocal(SAVED_OPEN_KEY) === '1');
+	function toggleSaved() {
+		savedOpen = !savedOpen;
+		writeLocal(SAVED_OPEN_KEY, savedOpen ? '1' : '0');
+	}
+	/** It slides out of the rail: sideways from a standing rail, else up/down. */
+	const savedFly = (col: boolean) => (col ? { x: -8, duration: 160 } : { y: -8, duration: 160 });
+
 	/** A preset's icon grows with its thickness, within its brush's range. */
 	const presetSize = (p: Preset) => {
 		const b = INKS[p.brush];
@@ -216,7 +226,27 @@
 		pop = pop === p ? '' : p;
 	}
 	let showSettings = $state(false);
-	let showOthers = $state(true);
+	/** Others' cursors and view frames on the canvas. Off unless switched on
+	 *  on this device (the user found them distracting); lasers and strokes
+	 *  being drawn show either way. */
+	const OTHERS_KEY = 'conote:others';
+	let showOthers = $state(
+		(() => {
+			try {
+				return localStorage.getItem(OTHERS_KEY) === '1';
+			} catch {
+				return false;
+			}
+		})()
+	);
+	function setShowOthers(on: boolean) {
+		showOthers = on;
+		try {
+			localStorage.setItem(OTHERS_KEY, on ? '1' : '0');
+		} catch {
+			/* not remembered, still set for this session */
+		}
+	}
 
 	/** What this session's view keeps framed by itself: the whole drawing as
 	 *  it grows (the laptop-in-a-call view), another device's view (by its
@@ -226,6 +256,21 @@
 
 	/** The pen is down (stroke or laser): the chrome steps back. */
 	let inking = $state(false);
+
+	/** Gestures don't zoom (a pinch only pans): for writing zoomed in without
+	 *  the view drifting. Per device, remembered. */
+	const ZOOM_LOCK_KEY = 'conote:zoomLock';
+	let zoomLock = $state(readLocal(ZOOM_LOCK_KEY) === '1');
+	/** Shown for a moment after the lock is switched. */
+	let zoomNotice = $state('');
+	let zoomNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+	function toggleZoomLock() {
+		zoomLock = !zoomLock;
+		writeLocal(ZOOM_LOCK_KEY, zoomLock ? '1' : '0');
+		zoomNotice = zoomLock ? 'Pinching only moves the view now; + and − still zoom.' : 'Pinching zooms again.';
+		clearTimeout(zoomNoticeTimer);
+		zoomNoticeTimer = setTimeout(() => (zoomNotice = ''), 2200);
+	}
 
 	/** Glide to the nearest page edge when scrolling stops. Per device, remembered. */
 	const SNAP_KEY = 'conote:snap';
@@ -1338,6 +1383,7 @@
 			onpentouch={(info) => (penTouch = info)}
 			onpenstats={(st) => (penStats = st)}
 			{fastInk}
+			{zoomLock}
 		/>
 	</main>
 
@@ -1410,6 +1456,16 @@
 			<button class="ibtn pm" onclick={() => zoomBy(0.8)} aria-label="Zoom out" title="Zoom out (−)"><Icon name="minus" size={18} /></button>
 			<button class="pct" onclick={resetView} title="Back to 100% (0)">{zoomPct}<small>%</small></button>
 			<button class="ibtn pm" onclick={() => zoomBy(1.25)} aria-label="Zoom in" title="Zoom in (+)"><Icon name="plus" size={18} /></button>
+			<button
+				class="ibtn lock"
+				class:on={zoomLock}
+				onclick={toggleZoomLock}
+				aria-label="Lock zoom"
+				aria-pressed={zoomLock}
+				title={zoomLock ? 'Zoom locked: pinch and Ctrl+wheel only move the view. Tap to unlock.' : 'Lock zoom: pinching only moves the view'}
+			>
+				<Icon name={zoomLock ? 'lock' : 'lockOpen'} size={16} />
+			</button>
 			<span class="pm {col ? 'hr' : 'vr'}"></span>
 			<button
 				class="word"
@@ -1459,17 +1515,36 @@
 				<span class="dish"><span class="blob" style:background={color} style:--w="{Math.min(20, 4 + strokeWidth * 0.55)}px"></span></span>
 			</button>
 			{#if presets.length && bars.profile === 'wide'}
-				{#each presets as p, i (i)}
+				<!-- Saved inks fold out beside the rail, so they never make it longer. -->
+				<span class="savedwrap">
 					<button
-						class="preset"
-						class:on={isCurrent(p)}
-						onclick={() => usePreset(p)}
-						title={`${INKS[p.brush].label}, ${p.width} pt`}
-						aria-label={`Saved ink: ${INKS[p.brush].label} ${p.color}, ${p.width} pt`}
+						class="ink savedbtn"
+						class:on={savedOpen}
+						onclick={toggleSaved}
+						title={savedOpen ? 'Fold away the saved inks' : 'Saved inks'}
+						aria-label="Saved inks"
+						aria-expanded={savedOpen}
 					>
-						{@render presetMark(p)}
+						<span class="dish fan">
+							{#each presets.slice(0, 4) as p, i (i)}<span style:background={p.color}></span>{/each}
+						</span>
 					</button>
-				{/each}
+					{#if savedOpen}
+						<div class="chrome savedtray" class:col role="group" aria-label="Saved inks" transition:fly={savedFly(col)}>
+							{#each presets as p, i (i)}
+								<button
+									class="preset"
+									class:on={isCurrent(p)}
+									onclick={() => usePreset(p)}
+									title={`${INKS[p.brush].label}, ${p.width} pt`}
+									aria-label={`Saved ink: ${INKS[p.brush].label} ${p.color}, ${p.width} pt`}
+								>
+									{@render presetMark(p)}
+								</button>
+							{/each}
+						</div>
+					{/if}
+				</span>
 			{/if}
 			<span class={col ? 'hr' : 'vr'}></span>
 			<button class="tool" onclick={() => noteStore.undo()} disabled={!noteStore.canUndo} title="Undo (Ctrl+Z)" aria-label="Undo">
@@ -1691,7 +1766,7 @@
 					{/each}
 				</ul>
 				<label class="switch">
-					<input type="checkbox" bind:checked={showOthers} />
+					<input type="checkbox" checked={showOthers} onchange={(e) => setShowOthers(e.currentTarget.checked)} />
 					<span class="track"></span>
 					<span>Show their cursors &amp; views</span>
 				</label>
@@ -1905,6 +1980,11 @@
 					</button>
 				{/if}
 				<span class="kicker sect">Screen</span>
+				<button class="item" onclick={toggleZoomLock} title="Pinching and Ctrl+wheel only move the view; + and − still zoom (this device only)">
+					<Icon name={zoomLock ? 'lock' : 'lockOpen'} size={18} /><span>Lock zoom</span><span class="kicker" class:lit={zoomLock}
+						>{zoomLock ? 'on' : 'off'}</span
+					>
+				</button>
 				<button
 					class="item"
 					disabled={noteStore.pages.length === 0}
@@ -2155,6 +2235,12 @@
 			<div class="notice" role="status" transition:fly={{ y: -12, duration: 220 }}>
 				<span class="pip" style:background={pulledBy.color}></span>
 				<span><b>{pulledBy.label}</b> brought you to their view</span>
+			</div>
+		{/if}
+		{#if zoomNotice}
+			<div class="notice" role="status" transition:fly={{ y: -12, duration: 220 }}>
+				<span class="kicker lime">{zoomLock ? 'Zoom locked' : 'Zoom'}</span>
+				<span>{zoomNotice}</span>
 			</div>
 		{/if}
 		{#if penNotice}
@@ -2910,6 +2996,57 @@
 			width: 34px;
 			height: 32px;
 		}
+	}
+	/* A standing zoom bar (joined to the tools) is already tall: the lock
+	   stays in the ⋯ menu there. */
+	@media (max-height: 900px) {
+		.zoombar.col .lock {
+			display: none;
+		}
+	}
+
+	/* The saved inks' button (their colours on one dish) and the strip it
+	   folds out: parallel to the rail, just outside its capsule, starting at
+	   the button — below a rail along the top, above one along the bottom,
+	   beside one standing at a side. */
+	.savedwrap {
+		position: relative;
+		display: grid;
+	}
+	.fan {
+		display: grid;
+		grid-template-columns: repeat(2, 8px);
+		gap: 3px;
+		place-content: center;
+	}
+	.fan > span {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		box-shadow: inset 0 0 0 1px rgb(25 24 20 / 0.18);
+	}
+	.fan > span:only-child {
+		grid-column: span 2;
+		justify-self: center;
+		width: 12px;
+		height: 12px;
+	}
+	.savedtray {
+		top: calc(100% + 12px);
+		left: -4px;
+	}
+	.savedtray.col {
+		flex-direction: column;
+		top: -4px;
+		left: calc(100% + 12px);
+	}
+	.group[data-anchor^='bottom'] .savedtray {
+		top: auto;
+		bottom: calc(100% + 12px);
+	}
+	.group[data-anchor='right'] .savedtray {
+		left: auto;
+		right: calc(100% + 12px);
 	}
 	.saved {
 		display: flex;

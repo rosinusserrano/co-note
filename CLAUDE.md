@@ -250,6 +250,15 @@ chosen device.
   panel), a wrong one refused, an account without one says so; a
   pre-vault connected device keeps its connection in the account from
   *Change*, and a new device gets it.
+  Tablet round (3 + 10 + 6 checks, plus bars, presets, arc, regress,
+  phone, present, pen re-run green): a 40-page PDF, the owner zoomed in on
+  one page, a tablet-sized device at 6× slower CPU zoomed in elsewhere is
+  pulled: no exception, the canvas shows the owner's page, it pans after
+  (before the fix: a 0×0 page bitmap threw every frame, the canvas froze);
+  zoom lock: a pinch pans without zooming, Ctrl+wheel ignored, + still
+  zooms, kept over a reload; others' cursors off by default and remembered
+  when on; saved inks: one rail button, unfolds a strip beside the rail
+  without growing it, picks the ink, stays open over a reload.
 - **Not yet verified on real hardware:** on-device stylus feel and the Android
   install path over HTTPS.
 - **Next:** see `ROADMAP.md`. Direct links run *alongside* the relay; the relay
@@ -741,7 +750,10 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   `view` (world rect this session shows). `label` is the name typed on
   joining/creating (optional, per device: `myName()` in `noteIndex`,
   localStorage `conote:name`), else `"<Role> · <device>"`; it's what cursor
-  tags, view frames, the people list, focus chips and the pulled notice show. `DrawingCanvas` publishes them
+  tags, view frames, the people list, focus chips and the pulled notice show.
+  Others' cursors and view frames are **drawn only if switched on** (people
+  panel, per device `conote:others`, off by default — the user's call);
+  lasers and live strokes show either way. `DrawingCanvas` publishes them
   throttled (50 ms / 120 ms); `readPresence` validates other devices' states
   (they're untrusted) and picks each one's colour from its client id. Others'
   views are only *drawn* — never adopted — with two exceptions: pulls, below,
@@ -767,6 +779,11 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   goes far out; a target inside the current view is a plain zoom. This is the one time a
   device's viewport is set from outside — a one-shot jump by the owner; the
   viewport is still never synced, and anyone can move away right after.
+  **Clamp the glide's time to 0…1:** a frame's timestamp can be from
+  before `t0` (the pull arrives mid-frame on a busy device); k < 0 read the
+  arc's table at −1, the view went NaN, a PDF page rendered into a 0×0
+  canvas, and `drawImage` of it threw every frame — on the user's tablet a
+  blank screen that wouldn't scroll. A non-finite step is skipped too.
   **The relay enforces owner-only:** `stripFields` removes `pull` from every
   awareness update arriving on a connection without a valid owner proof, so
   any `pull` a device sees came from the owner. (Awareness doesn't travel
@@ -825,7 +842,11 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   observe mode. Wheel **scrolls** (Shift: sideways; line/page `deltaMode`s
   scaled), Ctrl+wheel (= trackpad pinch) **zooms** at the cursor — whatever
   the tool (the hand tool zooming on the plain wheel was tried and reverted
-  at the user's request). The wheel
+  at the user's request). **Lock zoom** (`zoomLock`: the lock in the zoom
+  bar, and ⋯ → Lock zoom; per device `conote:zoomLock`): a pinch only pans
+  and Ctrl+wheel does nothing; the zoom buttons, keys, Fit, follow and pulls
+  still zoom. A standing zoom bar on a screen under 900 px tall leaves the
+  lock to the menu (joined to the tools it would run off the screen). The wheel
   listener is bound by hand with `passive: false`: its `preventDefault()` is
   what stops Ctrl+wheel zooming the browser page. `touch-action: none` — we own
   all gestures.
@@ -900,7 +921,9 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   just joins up. Everything in a chunk is validated (untrusted), and the
   relay strips `live` from observers.
 - **Rendering** is an imperative `requestAnimationFrame` loop gated by dirty
-  flags, not per-point reactivity. Committed strokes are drawn into an offscreen
+  flags, not per-point reactivity. `render` asks for its next frame *first*,
+  so one frame that throws can't freeze the canvas; `PageRenderer` also
+  refuses non-finite views and sizes (see Pulls). Committed strokes are drawn into an offscreen
   `base` canvas only when `baseDirty` (revision / viewport / resize); each frame
   composites paper (warm `PAPER`) → dot grid → pages (white sheet + PDF
   bitmap) → `base` → presence → eraser ring (our live stroke: on the ink
@@ -955,9 +978,12 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   slider's range comes from the preset (logarithmic, so the pen's 0.1 pt —
   for drawing zoomed far in — gets as much travel as its thick end). **Saved inks** (`presets`, localStorage
   `conote:presets`, at most 6, validated on read): brush + colour + size,
-  saved and forgotten in the ink panel, shown on the rail (wide screens only;
-  phones use the panel) as the brush's icon in that colour, sized by where
-  the size sits in the brush's range.
+  saved and forgotten in the ink panel, and on the rail (wide screens only;
+  phones use the panel) behind **one button** (their colours on a dish) that
+  folds them out as a strip of their own beside the rail, parallel to it
+  (`savedtray`; open state per device, `conote:savedOpen`) — the rail never
+  grows with them. Each shows as the brush's icon in that colour, sized by
+  where the size sits in the brush's range.
 - **`mode = 'observe'`** disables inking but still allows pan/zoom — this is the
   README's "observer" session.
 - **Tools:** `tool = 'pen' | 'brush' | 'marker' | 'text' | 'shape' | 'eraser' | 'lasso' | 'laser' | 'hand'`
