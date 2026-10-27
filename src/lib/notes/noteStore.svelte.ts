@@ -5,6 +5,8 @@
 //   - Y.Array<Stroke>          the shared, mergeable list of strokes
 //   - Y.Array<TextBox>         text boxes (a separate array: clients from before
 //                              text never see them, rather than choke on them)
+//   - Y.Array<Shape>           rectangles, ellipses, lines, arrows and covers
+//                              (separate for the same reason)
 //   - Y.Array<PageEntry>       the note's pages (imported PDF pages, added
 //                              blank pages), in export order; Y.Map 'meta' holds
 //                              the page layout. PDF files themselves live on the
@@ -30,7 +32,7 @@
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { IndexeddbPersistence } from 'y-indexeddb';
-import { uid, type Brush, type PageEntry, type PageLayout, type Stroke, type TextBox } from './model';
+import { uid, type Brush, type PageEntry, type PageLayout, type Shape, type Stroke, type TextBox } from './model';
 import { P2PLinks } from './p2p';
 import { layoutPages, contentBounds, PAGE_GAP, type PlacedPage } from './pages';
 import { getCachedFile, cacheFile, dropCachedFiles } from './files';
@@ -223,6 +225,7 @@ class NoteStore {
 	revision = $state(0); // bumps on any strokes change (canvas redraw trigger)
 	strokeCount = $state(0);
 	textCount = $state(0);
+	shapeCount = $state(0);
 	canUndo = $state(false);
 	canRedo = $state(false);
 	status = $state<SyncStatus>('offline');
@@ -252,6 +255,7 @@ class NoteStore {
 	#doc: Y.Doc | null = null;
 	#arr: Y.Array<Stroke> | null = null;
 	#texts: Y.Array<TextBox> | null = null;
+	#shapes: Y.Array<Shape> | null = null;
 	#pages: Y.Array<PageEntry> | null = null;
 	#meta: Y.Map<unknown> | null = null;
 	#token = '';
@@ -270,6 +274,7 @@ class NoteStore {
 	#liveTimer: ReturnType<typeof setTimeout> | null = null;
 	#cache: Stroke[] = [];
 	#textCache: TextBox[] = [];
+	#shapeCache: Shape[] = [];
 
 	/** Plain, non-reactive snapshot of strokes for imperative rendering. Pair
 	 *  reads with a read of `revision` to stay reactive. */
@@ -280,6 +285,11 @@ class NoteStore {
 	/** The text boxes, like `strokes`. */
 	get texts(): TextBox[] {
 		return this.#textCache;
+	}
+
+	/** The shapes, like `strokes`. */
+	get shapes(): Shape[] {
+		return this.#shapeCache;
 	}
 
 	/** Open a note, tearing down any note already open. Switching notes swaps the
@@ -301,11 +311,13 @@ class NoteStore {
 		const doc = new Y.Doc();
 		const arr = doc.getArray<Stroke>('strokes');
 		const texts = doc.getArray<TextBox>('texts');
+		const shapes = doc.getArray<Shape>('shapes');
 		const pages = doc.getArray<PageEntry>('pages');
 		const meta = doc.getMap<unknown>('meta');
 		this.#doc = doc;
 		this.#arr = arr;
 		this.#texts = texts;
+		this.#shapes = shapes;
 		this.#pages = pages;
 		this.#meta = meta;
 		this.#token = token;
@@ -327,7 +339,7 @@ class NoteStore {
 		// undo/redo only ever affects this device's own strokes.
 		// Pages are tracked too, so adding/deleting a page or importing a PDF is
 		// one undo step like any stroke.
-		this.#undo = new Y.UndoManager([arr, texts, pages], { captureTimeout: 400 });
+		this.#undo = new Y.UndoManager([arr, texts, shapes, pages], { captureTimeout: 400 });
 		const flags = () => this.#syncUndoFlags();
 		this.#undo.on('stack-item-added', flags);
 		this.#undo.on('stack-item-popped', flags);
@@ -337,6 +349,9 @@ class NoteStore {
 			if (current()) this.#refresh();
 		});
 		texts.observe(() => {
+			if (current()) this.#refresh();
+		});
+		shapes.observe(() => {
 			if (current()) this.#refresh();
 		});
 		pages.observe(() => {
@@ -585,6 +600,7 @@ class NoteStore {
 		this.#doc = null;
 		this.#arr = null;
 		this.#texts = null;
+		this.#shapes = null;
 		this.#pages = null;
 		this.#meta = null;
 		this.#token = '';
@@ -599,9 +615,11 @@ class NoteStore {
 
 		this.#cache = [];
 		this.#textCache = [];
+		this.#shapeCache = [];
 		this.loaded = false;
 		this.strokeCount = 0;
 		this.textCount = 0;
+		this.shapeCount = 0;
 		this.canUndo = false;
 		this.canRedo = false;
 		this.status = 'offline';
@@ -630,14 +648,14 @@ class NoteStore {
 		this.#arr.push([stroke]);
 	}
 
-	/** Remove strokes and text boxes by id in one transaction (so an erase
-	 *  drag merges into a single undo step). Does NOT start a new undo
+	/** Remove strokes, text boxes and shapes by id in one transaction (so an
+	 *  erase drag merges into a single undo step). Does NOT start a new undo
 	 *  boundary — the caller owns that via beginChange(). */
 	removeStrokes(ids: Set<string>) {
-		if (!this.#arr || !this.#texts || !this.#doc || ids.size === 0) return;
+		if (!this.#arr || !this.#texts || !this.#shapes || !this.#doc || ids.size === 0) return;
 		const doc = this.#doc;
 		doc.transact(() => {
-			for (const list of [this.#arr!, this.#texts!] as unknown as Y.Array<{ id: string }>[]) {
+			for (const list of [this.#arr!, this.#texts!, this.#shapes!] as unknown as Y.Array<{ id: string }>[]) {
 				for (let i = list.length - 1; i >= 0; i--) {
 					if (ids.has(list.get(i).id)) list.delete(i, 1);
 				}
@@ -661,31 +679,56 @@ class NoteStore {
 		});
 	}
 
-	/** Remove the items `remove` (strokes and text boxes, by id) and add
-	 *  `strokes` / `texts`, as one undo step: a lasso move, cut or paste.
-	 *  Items are immutable, so a moved one comes back under a new id. */
-	replaceItems(remove: Set<string>, strokes: Stroke[], texts: TextBox[]) {
+	/** Remove the items `remove` (strokes, text boxes and shapes, by id) and
+	 *  add `strokes` / `texts` / `shapes`, as one undo step: a lasso move, cut
+	 *  or paste. Items are immutable, so a moved one comes back under a new id. */
+	replaceItems(remove: Set<string>, strokes: Stroke[], texts: TextBox[], shapes: Shape[] = []) {
 		const arr = this.#arr;
 		const boxes = this.#texts;
-		if (!arr || !boxes || !this.#doc) return;
-		if (remove.size + strokes.length + texts.length === 0) return;
+		const drawn = this.#shapes;
+		if (!arr || !boxes || !drawn || !this.#doc) return;
+		if (remove.size + strokes.length + texts.length + shapes.length === 0) return;
 		this.beginChange();
 		this.#doc.transact(() => {
 			this.removeStrokes(remove);
 			if (strokes.length > 0) arr.push(strokes);
 			if (texts.length > 0) boxes.push(texts);
+			if (shapes.length > 0) drawn.push(shapes);
 		});
 	}
 
-	/** Clear all ink and text. */
+	/** Add a shape. One undo step. */
+	addShape(shape: Shape) {
+		if (!this.#shapes) return;
+		this.beginChange();
+		this.#shapes.push([shape]);
+	}
+
+	/** Replace shape `id` with `shape` (a cover lifted or put back). One undo
+	 *  step; a no-op if `id` is gone (someone erased it meanwhile). */
+	setShape(id: string, shape: Shape) {
+		const shapes = this.#shapes;
+		if (!shapes || !this.#doc) return;
+		const i = shapes.toArray().findIndex((s) => s.id === id);
+		if (i < 0) return;
+		this.beginChange();
+		this.#doc.transact(() => {
+			shapes.delete(i, 1);
+			shapes.push([shape]);
+		});
+	}
+
+	/** Clear all ink, text and shapes. */
 	clear() {
 		const arr = this.#arr;
 		const texts = this.#texts;
-		if (!arr || !texts || !this.#doc || arr.length + texts.length === 0) return;
+		const shapes = this.#shapes;
+		if (!arr || !texts || !shapes || !this.#doc || arr.length + texts.length + shapes.length === 0) return;
 		this.beginChange();
 		this.#doc.transact(() => {
 			arr.delete(0, arr.length);
 			texts.delete(0, texts.length);
+			shapes.delete(0, shapes.length);
 		});
 	}
 
@@ -701,7 +744,7 @@ class NoteStore {
 
 	/** World bounds of pages + ink, for Fit / Follow. */
 	contentBounds() {
-		return contentBounds(this.#cache, this.pages, this.#textCache);
+		return contentBounds(this.#cache, this.pages, this.#textCache, this.#shapeCache);
 	}
 
 	/** A file of this note: from this device's cache, else from the server. */
@@ -761,8 +804,8 @@ class NoteStore {
 		this.beginChange();
 		doc.transact(() => {
 			// The first pages go below (or beside) any ink already there, not over it.
-			if (pages.length === 0 && this.#cache.length + this.#textCache.length > 0) {
-				const b = contentBounds(this.#cache, [], this.#textCache);
+			if (pages.length === 0 && this.#cache.length + this.#textCache.length + this.#shapeCache.length > 0) {
+				const b = contentBounds(this.#cache, [], this.#textCache, this.#shapeCache);
 				if (b) {
 					meta.set(
 						'origin',
@@ -788,6 +831,8 @@ class NoteStore {
 			if (strokes.length > 0) arr.push(strokes.map((s) => ({ ...s, id: uid(), page: ids[s.page] })));
 			const texts = conote?.texts.filter((t) => keep(t.page)) ?? [];
 			if (texts.length > 0) this.#texts!.push(texts.map((t) => ({ ...t, id: uid(), page: ids[t.page] })));
+			const shapes = conote?.shapes.filter((sh) => keep(sh.page)) ?? [];
+			if (shapes.length > 0) this.#shapes!.push(shapes.map((sh) => ({ ...sh, id: uid(), page: ids[sh.page] })));
 		});
 		return { conote: conote !== null };
 	}
@@ -835,7 +880,7 @@ class NoteStore {
 	/** The note as a PDF (see exportPdf.ts). */
 	async exportPdf(): Promise<Uint8Array> {
 		const { exportPdf } = await import('./exportPdf');
-		return exportPdf(this.#pages?.toArray() ?? [], this.#cache, this.#textCache, (h) => this.fileBytes(h), this.layout);
+		return exportPdf(this.#pages?.toArray() ?? [], this.#cache, this.#textCache, this.#shapeCache, (h) => this.fileBytes(h), this.layout);
 	}
 
 	#refresh() {
@@ -843,6 +888,8 @@ class NoteStore {
 		this.strokeCount = this.#cache.length;
 		this.#textCache = this.#texts ? this.#texts.toArray() : [];
 		this.textCount = this.#textCache.length;
+		this.#shapeCache = this.#shapes ? this.#shapes.toArray() : [];
+		this.shapeCount = this.#shapeCache.length;
 		const layout = this.#meta?.get('layout') === 'horizontal' ? 'horizontal' : 'vertical';
 		const origin = this.#meta?.get('origin') as { x: number; y: number } | undefined;
 		this.layout = layout;

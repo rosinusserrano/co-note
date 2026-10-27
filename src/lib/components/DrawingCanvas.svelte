@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { flushSync, untrack } from 'svelte';
 	import { noteStore, type Presence } from '$lib/notes/noteStore.svelte';
-	import { uid, type Stroke, type StrokePoint, type TextBox } from '$lib/notes/model';
+	import { uid, type Shape, type ShapeKind, type Stroke, type StrokePoint, type TextBox } from '$lib/notes/model';
+	import { arrowHead, constrain, shapeBox, shapeHit } from '$lib/notes/shapes';
 	import { TEXT_ASCENT, TEXT_FONT, TEXT_LINE, remeasureText, textBounds, textLines } from '$lib/notes/text';
 	import { framing, type Box, type Viewport } from '$lib/notes/viewport.svelte';
 	import { inkShape, liveInkShape, isMarker, strokeZoom, MARKER_ALPHA, type InkShape } from '$lib/notes/ink';
@@ -17,8 +18,20 @@
 		mode?: 'draw' | 'observe';
 		/** Active tool for pen/mouse input: a brush, the eraser, the laser
 		 *  pointer, the hand (drags the view around), text (a tap places or
-		 *  edits a text box), or the lasso (select, move, copy, paste). */
-		tool?: Brush | 'eraser' | 'laser' | 'hand' | 'text' | 'lasso';
+		 *  edits a text box), the lasso (select, move, copy, paste), or shapes
+		 *  (drag one out; a tap on a cover lifts it or puts it back). */
+		tool?: Brush | 'eraser' | 'laser' | 'hand' | 'text' | 'lasso' | 'shape';
+		/** Which shape the shape tool draws. */
+		shapeKind?: ShapeKind;
+		/** Presenting: a tap on a cover lifts it (or puts it back) whatever
+		 *  the tool, instead of leaving a dot. */
+		coverTaps?: boolean;
+		/** Outline lifted covers (where they'd go back), for editors. */
+		openCovers?: boolean;
+		/** The desk around the pages: warm paper with dots, or dark (presenting). */
+		desk?: 'paper' | 'dark';
+		/** Page numbers (and editors' page buttons) above the pages. */
+		labels?: boolean;
 		color?: string;
 		/** A brush's width; with the text tool, the font size. */
 		strokeWidth?: number;
@@ -75,12 +88,19 @@
 		fingerInks = false,
 		onpen,
 		penButton = null,
-		onpentouch
+		onpentouch,
+		shapeKind = 'rect',
+		coverTaps = false,
+		openCovers = true,
+		desk = 'paper',
+		labels = true
 	}: Props = $props();
 
 	// The desk around the pages: warm paper with a dot grid. Pages stay white
 	// (that's what a PDF expects, and what export prints on).
 	const PAPER = '#f4f0e7';
+	/** The desk while presenting: the pages stand out on it like slides. */
+	const DARK_DESK = '#22211d';
 	const GRID_DOT = 'rgba(52, 44, 28, 0.24)';
 	/** Dot spacing on screen stays within [2, 4) × this many px: the world
 	 *  spacing halves / doubles with the zoom, the finer level fading in. */
@@ -287,6 +307,17 @@
 				if (mine.length > 0) onPage(layer, page, () => mine.forEach((s) => drawShape(layer, s.color, inkShape(s))));
 			}
 		}
+		// Shapes over the ink (a cover hides what's under it), covers first.
+		for (const covers of [true, false]) {
+			for (const sh of noteStore.shapes) {
+				if ((sh.kind === 'cover') !== covers || sh.open || lifted?.has(sh.id)) continue;
+				if (!sh.page) drawShapeItem(c, sh);
+				else {
+					const page = pages.get(sh.page);
+					if (page) onPage(c, page, () => drawShapeItem(c, sh));
+				}
+			}
+		}
 		// Text on top of the ink; the one being edited is the editor's to show.
 		const hidden = editing?.id;
 		for (const t of noteStore.texts) {
@@ -297,6 +328,54 @@
 				if (page) onPage(c, page, () => drawText(c, t));
 			}
 		}
+	}
+
+	/** A shape in the current transform (see shapes.ts). */
+	function drawShapeItem(c: CanvasRenderingContext2D, sh: Shape) {
+		const b = shapeBox(sh);
+		if (sh.kind === 'cover') {
+			c.fillStyle = sh.color;
+			c.fillRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+			return;
+		}
+		c.strokeStyle = sh.color;
+		c.lineWidth = sh.width;
+		c.lineCap = 'round';
+		c.lineJoin = 'round';
+		c.beginPath();
+		if (sh.kind === 'rect') c.rect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+		else if (sh.kind === 'ellipse') c.ellipse((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, (b.x1 - b.x0) / 2, (b.y1 - b.y0) / 2, 0, 0, Math.PI * 2);
+		else {
+			c.moveTo(sh.x0, sh.y0);
+			c.lineTo(sh.x1, sh.y1);
+			if (sh.kind === 'arrow') {
+				const [l, r] = arrowHead(sh);
+				c.moveTo(l.x, l.y);
+				c.lineTo(sh.x1, sh.y1);
+				c.lineTo(r.x, r.y);
+			}
+		}
+		c.stroke();
+	}
+
+	/** Lifted covers, outlined where they'd go back (editors only, not
+	 *  while presenting): a tap there puts one back. */
+	function drawOpenCovers(c: CanvasRenderingContext2D) {
+		const pages = new Map(noteStore.pages.map((p) => [p.id, p]));
+		c.setTransform(dpr, 0, 0, dpr, 0, 0);
+		c.lineWidth = 1.25;
+		c.setLineDash([6, 5]);
+		for (const sh of noteStore.shapes) {
+			if (sh.kind !== 'cover' || !sh.open) continue;
+			const page = sh.page ? pages.get(sh.page) : null;
+			if (page === undefined) continue;
+			const b = shapeBox(sh);
+			const a = viewport.toScreen(b.x0 + (page?.x ?? 0), b.y0 + (page?.y ?? 0));
+			const z = viewport.toScreen(b.x1 + (page?.x ?? 0), b.y1 + (page?.y ?? 0));
+			c.strokeStyle = 'rgba(25,24,20,0.45)';
+			c.strokeRect(a.x, a.y, z.x - a.x, z.y - a.y);
+		}
+		c.setLineDash([]);
 	}
 
 	/** A text box in the current transform. Drawn at 100px and scaled, since
@@ -613,9 +692,9 @@
 			dirty = false;
 			// Paper, then pages (PDF content), then ink on top of both.
 			ctx.setTransform(1, 0, 0, 1, 0, 0);
-			ctx.fillStyle = PAPER;
+			ctx.fillStyle = desk === 'dark' ? DARK_DESK : PAPER;
 			ctx.fillRect(0, 0, canvas.width, canvas.height);
-			drawGrid(ctx);
+			if (desk === 'paper') drawGrid(ctx);
 			drawPages(ctx);
 			if (pageDots) drawPageDots(ctx);
 			// Markers: translucent, multiplied onto paper/PDF, under the other ink.
@@ -633,6 +712,13 @@
 			drawOthersLive(ctx, false);
 			drawMoving(ctx, false);
 			if (liveStroke && !isMarker(liveStroke)) drawLive(ctx);
+			if (liveShape) {
+				setWorldTransform(ctx);
+				const sh = liveShape;
+				if (shapePage) onPage(ctx, shapePage, () => drawShapeItem(ctx!, sh));
+				else drawShapeItem(ctx, sh);
+			}
+			if (openCovers && mode === 'draw' && noteStore.shapes.some((sh) => sh.open)) drawOpenCovers(ctx);
 			drawSelection(ctx);
 			if (showPresence && noteStore.presence.length > 0) drawPresence(ctx, noteStore.presence);
 			// Lasers show even with "Others" off: pointing is meant to be seen.
@@ -670,6 +756,9 @@
 		void showPresence;
 		void showViews;
 		void pageDots;
+		void desk;
+		void openCovers;
+		void mode;
 		markDirty();
 	});
 
@@ -814,6 +903,62 @@
 		editor?.focus();
 		baseDirty = true;
 		markDirty();
+		// Held and dragged rather than tapped: the box goes along.
+		beginTextDrag(e);
+	}
+
+	/** Moving the text box being typed: by dragging from where it was placed
+	 *  or tapped, or by its grip. `from` is where the drag began (world), `at`
+	 *  the box's corner then (local to its page). */
+	let textDrag: { pointerId: number; from: { x: number; y: number }; at: { x: number; y: number }; moved: boolean } | null = null;
+	/** Under this many screen px a drag is still a tap. */
+	const TEXT_DRAG_PX = 4;
+
+	function beginTextDrag(e: PointerEvent) {
+		if (!editing) return;
+		const at = local(e);
+		canvas.setPointerCapture(e.pointerId);
+		textDrag = { pointerId: e.pointerId, from: viewport.toWorld(at.x, at.y), at: { x: editing.x, y: editing.y }, moved: false };
+	}
+
+	/** The editor's grip: drag the box somewhere else while typing. */
+	function onGripDown(e: PointerEvent) {
+		if (!editing || (e.pointerType === 'mouse' && e.button !== 0)) return;
+		e.preventDefault(); // keeps the focus (and the keyboard) in the editor
+		e.stopPropagation();
+		measure();
+		beginTextDrag(e);
+		if (textDrag) textDrag.moved = true;
+	}
+
+	function moveTextDrag(e: PointerEvent) {
+		const d = textDrag;
+		if (!d || !editing) return;
+		const here = local(e);
+		const w = viewport.toWorld(here.x, here.y);
+		const dx = w.x - d.from.x;
+		const dy = w.y - d.from.y;
+		if (!d.moved && Math.hypot(dx, dy) * viewport.scale < TEXT_DRAG_PX) return;
+		d.moved = true;
+		editing.x = d.at.x + dx;
+		editing.y = d.at.y + dy;
+	}
+
+	/** The drag is over: the box belongs to the page under its corner now. */
+	function endTextDrag() {
+		const d = textDrag;
+		textDrag = null;
+		const ed = editing;
+		if (!d || !ed) return;
+		if (d.moved) {
+			const wx = ed.x + (ed.page?.x ?? 0);
+			const wy = ed.y + (ed.page?.y ?? 0);
+			const page = pageAt(noteStore.pages, wx + 1, wy + 1) ?? null;
+			ed.page = page;
+			ed.x = wx - (page?.x ?? 0);
+			ed.y = wy - (page?.y ?? 0);
+		}
+		editor?.focus();
 	}
 
 	/** Store the text being typed (an emptied box is removed) and close the editor. */
@@ -837,7 +982,7 @@
 	 *  panel, whose colour and size then restyle the box being edited. */
 	function onEditorBlur(e: FocusEvent) {
 		const to = e.relatedTarget as HTMLElement | null;
-		if (to?.closest('[data-pop]')) return;
+		if (to?.closest('[data-pop]') || textDrag) return; // a drag hands the focus back after
 		commitText();
 	}
 	$effect(() => {
@@ -911,7 +1056,9 @@
 		setWorldTransform(c);
 		c.translate(moveBy.x, moveBy.y);
 		for (const s of selection.items.strokes) if (isMarker(s) === markersPass) drawShape(c, s.color, inkShape(s));
-		if (!markersPass) for (const t of selection.items.texts) drawText(c, t);
+		if (markersPass) return;
+		for (const sh of selection.items.shapes) if (!sh.open) drawShapeItem(c, sh);
+		for (const t of selection.items.texts) drawText(c, t);
 	}
 
 	/** The lasso loop while drawn, then the selection's frame. */
@@ -973,7 +1120,7 @@
 			if (clipboard()) pasteAt = loop[0];
 			return;
 		}
-		select(lassoed(loop, noteStore.strokes, noteStore.texts, noteStore.pages));
+		select(lassoed(loop, noteStore.strokes, noteStore.texts, noteStore.shapes, noteStore.pages));
 	}
 
 	/** Drop the dragged selection where it is now: one undo step. */
@@ -988,8 +1135,8 @@
 		markDirty();
 		if (!commit || !selection || Math.hypot(d.x, d.y) * viewport.scale < 1) return;
 		const moved = place(selection.items, d.x, d.y, noteStore.pages);
-		noteStore.replaceItems(selection.ids, moved.strokes, moved.texts);
-		select(itemsById(itemIds(moved), noteStore.strokes, noteStore.texts, noteStore.pages));
+		noteStore.replaceItems(selection.ids, moved.strokes, moved.texts, moved.shapes);
+		select(itemsById(itemIds(moved), noteStore.strokes, noteStore.texts, noteStore.shapes, noteStore.pages));
 	}
 
 	function cancelLasso() {
@@ -1029,8 +1176,8 @@
 		pasteAt = null;
 		if (!clip || !box) return;
 		const items = place(clip, at.x - (box.x0 + box.x1) / 2, at.y - (box.y0 + box.y1) / 2, noteStore.pages);
-		noteStore.replaceItems(new Set(), items.strokes, items.texts);
-		if (tool === 'lasso') select(itemsById(itemIds(items), noteStore.strokes, noteStore.texts, noteStore.pages));
+		noteStore.replaceItems(new Set(), items.strokes, items.texts, items.shapes);
+		if (tool === 'lasso') select(itemsById(itemIds(items), noteStore.strokes, noteStore.texts, noteStore.shapes, noteStore.pages));
 	}
 
 	/** Ctrl+C / X / V, Delete, Esc. */
@@ -1061,7 +1208,7 @@
 	$effect(() => {
 		void noteStore.revision;
 		untrack(() => {
-			if (selection && !moving) select(itemsById(selection.ids, noteStore.strokes, noteStore.texts, noteStore.pages));
+			if (selection && !moving) select(itemsById(selection.ids, noteStore.strokes, noteStore.texts, noteStore.shapes, noteStore.pages));
 		});
 	});
 	// Another tool, or a session that can't draw: nothing selected.
@@ -1084,6 +1231,97 @@
 		return { left: Math.max(110, Math.min(r.x + r.w / 2, width - 110)), top };
 	});
 	const pastePos = $derived(pasteAt && viewport.toScreen(pasteAt.x, pasteAt.y));
+
+	// --- Shapes: drag one out; a tap on a cover lifts it or puts it back -------
+
+	/** The shape being dragged out (local to `shapePage`, if it started on one). */
+	let liveShape: Shape | null = null;
+	let shapePage: PlacedPage | null = null;
+	let shapePointerId: number | null = null;
+	/** Under this many screen px a drag is a tap. */
+	const TAP_PX = 5;
+
+	function startShape(e: PointerEvent, use: PenUse) {
+		const at = local(e);
+		const w = viewport.toWorld(at.x, at.y);
+		onactive?.(true);
+		shapePointerId = e.pointerId;
+		shapePage = pageAt(noteStore.pages, w.x, w.y) ?? null;
+		const x = w.x - (shapePage?.x ?? 0);
+		const y = w.y - (shapePage?.y ?? 0);
+		liveShape = { id: uid(), kind: shapeKind, x0: x, y0: y, x1: x, y1: y, color: use.color, width: use.width };
+		if (shapePage) liveShape.page = shapePage.id;
+		markDirty();
+	}
+
+	function moveShape(e: PointerEvent) {
+		const sh = liveShape;
+		if (!sh) return;
+		const at = local(e);
+		const w = viewport.toWorld(at.x, at.y);
+		let x = w.x - (shapePage?.x ?? 0);
+		let y = w.y - (shapePage?.y ?? 0);
+		if (e.shiftKey) ({ x, y } = constrain(sh.kind, sh.x0, sh.y0, x, y));
+		sh.x1 = x;
+		sh.y1 = y;
+		markDirty();
+	}
+
+	/** Pen-up: the shape goes into the note — or, if it was a tap, a cover there flips. */
+	function endShape(commit: boolean) {
+		const sh = liveShape;
+		const page = shapePage;
+		liveShape = null;
+		shapePage = null;
+		shapePointerId = null;
+		onactive?.(false);
+		markDirty();
+		if (!sh || !commit) return;
+		const tap = Math.hypot(sh.x1 - sh.x0, sh.y1 - sh.y0) * viewport.scale < TAP_PX;
+		if (tap) {
+			flipCoverAt(sh.x0 + (page?.x ?? 0), sh.y0 + (page?.y ?? 0));
+			return;
+		}
+		noteStore.addShape(sh.kind === 'cover' ? { ...sh, width: 0 } : sh);
+	}
+
+	/** The topmost cover at a world point, lifted or not. */
+	function coverAt(wx: number, wy: number) {
+		const pages = new Map(noteStore.pages.map((p) => [p.id, p]));
+		for (let i = noteStore.shapes.length - 1; i >= 0; i--) {
+			const sh = noteStore.shapes[i];
+			if (sh.kind !== 'cover') continue;
+			const p = sh.page ? pages.get(sh.page) : null;
+			if (p === undefined) continue;
+			const b = shapeBox(sh);
+			const x = wx - (p?.x ?? 0);
+			const y = wy - (p?.y ?? 0);
+			if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) return sh;
+		}
+		return null;
+	}
+
+	/** Lift the cover at a world point, or put it back: for everyone, one
+	 *  undo step. Returns whether there was one. */
+	function flipCoverAt(wx: number, wy: number) {
+		if (mode !== 'draw') return false;
+		const sh = coverAt(wx, wy);
+		if (!sh) return false;
+		const { open: _, ...closed } = sh;
+		noteStore.setShape(sh.id, sh.open ? { ...closed, id: uid() } : { ...sh, id: uid(), open: true });
+		return true;
+	}
+
+	/** A tap (not a drag) at screen point `at`, that began at `tapFrom`: flip a cover there. */
+	function tapCover(at: { x: number; y: number }) {
+		if (!tapFrom || Math.hypot(at.x - tapFrom.x, at.y - tapFrom.y) > TAP_PX) return false;
+		const w = viewport.toWorld(at.x, at.y);
+		return flipCoverAt(w.x, w.y);
+	}
+
+	/** Taps on covers flip them with the hand or shape tool, and with any
+	 *  tool while presenting. */
+	const coversByTap = () => mode === 'draw' && (coverTaps || tool === 'hand' || tool === 'shape');
 
 	// --- Pages -------------------------------------------------------------
 
@@ -1113,7 +1351,7 @@
 	// too far for them to fit there (rather than covering the page above).
 	const PILL_HEIGHT = 22;
 	const pills = $derived.by(() => {
-		if (PAGE_GAP * viewport.scale < PILL_HEIGHT + 4 || width === 0) return [];
+		if (!labels || PAGE_GAP * viewport.scale < PILL_HEIGHT + 4 || width === 0) return [];
 		const view = viewport.visible(width, height);
 		return noteStore.pages
 			.filter((p) => p.x < view.x + view.w && p.x + p.w > view.x && p.y - 30 / viewport.scale < view.y + view.h && p.y + p.h > view.y)
@@ -1262,6 +1500,13 @@
 			if (strokeHit(s, w.x - ox, w.y - oy, radius + s.width / 2)) hits.add(s.id);
 		}
 		for (const hit of textsAt(w.x, w.y, radius)) hits.add(hit.t.id);
+		for (const sh of noteStore.shapes) {
+			// A lifted cover is only erasable where its outline shows.
+			if (sh.open && !(openCovers && mode === 'draw')) continue;
+			const p = sh.page ? pages.get(sh.page) : null;
+			if (p === undefined) continue;
+			if (shapeHit(sh, w.x - (p?.x ?? 0), w.y - (p?.y ?? 0), radius)) hits.add(sh.id);
+		}
 		if (hits.size === 0) return;
 		if (!eraseStarted) {
 			noteStore.beginChange(); // one history step per erase gesture
@@ -1273,7 +1518,12 @@
 	/** A stroke, erase or laser is under way: the view holds still until it
 	 *  ends, or every sample after a move would land somewhere else. */
 	const inking = () =>
-		drawingPointerId !== null || erasePointerId !== null || laserPointerId !== null || lassoPointerId !== null || movePointerId !== null;
+		drawingPointerId !== null ||
+		erasePointerId !== null ||
+		laserPointerId !== null ||
+		lassoPointerId !== null ||
+		movePointerId !== null ||
+		shapePointerId !== null;
 
 	/** A touch to ignore: the hand holding the pen, not a finger meaning to
 	 *  pan or zoom. */
@@ -1282,7 +1532,13 @@
 	}
 
 	const inkPointer = (id: number) =>
-		id === drawingPointerId || id === erasePointerId || id === laserPointerId || id === lassoPointerId || id === movePointerId;
+		id === drawingPointerId ||
+		id === erasePointerId ||
+		id === laserPointerId ||
+		id === lassoPointerId ||
+		id === movePointerId ||
+		id === shapePointerId ||
+		id === textDrag?.pointerId;
 
 	function sawPen() {
 		penSeenAt = performance.now();
@@ -1328,6 +1584,7 @@
 			laserOff('self');
 			noteStore.setPresence({ laser: false });
 		} else if (first === lassoPointerId || first === movePointerId) cancelLasso();
+		else if (first === shapePointerId) endShape(false);
 		touchInk = null;
 		touchInkAt = null;
 		touches.set(first, at);
@@ -1428,6 +1685,7 @@
 			touchInkAt = local(e);
 		}
 		if (use.tool === 'lasso') return startLasso(e);
+		if (use.tool === 'shape') return startShape(e, use);
 		if (use.tool === 'laser') {
 			laserPointerId = e.pointerId;
 			onactive?.(true);
@@ -1467,8 +1725,10 @@
 		if (livePage) liveStroke.page = livePage.id;
 		liveSent = 0;
 		predicted = [];
-		// A finger stroke might still turn out to be a pinch: show it to the others once it's settled.
-		liveHoldUntil = finger ? inkStartedAt + FINGER_SETTLE_MS : 0;
+		// A finger stroke might still turn out to be a pinch, and one on a cover
+		// while presenting a tap that lifts it: show it to the others once
+		// it's settled.
+		liveHoldUntil = finger || (coverTaps && coverAt(w.x, w.y)) ? inkStartedAt + FINGER_SETTLE_MS : 0;
 		sendLive();
 		markDirty();
 	}
@@ -1517,6 +1777,7 @@
 			overSelection = tool === 'lasso' && inRect(selRect(), here);
 		}
 		if (e.pointerId !== drawingPointerId) publishCursor(pointerWorld);
+		if (textDrag?.pointerId === e.pointerId) return moveTextDrag(e);
 		if (e.pointerId === panPointerId && panLast) {
 			viewport.panBy(here.x - panLast.x, here.y - panLast.y);
 			panLast = here;
@@ -1541,6 +1802,7 @@
 			markDirty();
 			return;
 		}
+		if (e.pointerId === shapePointerId) return moveShape(e);
 		if (e.pointerId === movePointerId && moveFrom) {
 			moveBy = { x: pointerWorld.x - moveFrom.x, y: pointerWorld.y - moveFrom.y };
 			markDirty();
@@ -1580,7 +1842,7 @@
 		}
 		if (e.pointerType === 'touch' && !inkPointer(e.pointerId)) {
 			if (!touches.delete(e.pointerId)) return; // a palm, or dropped for the pen
-			if (touches.size === 0 && !pinched) tapLink(e);
+			if (touches.size === 0 && !pinched && !(coversByTap() && tapCover(local(e)))) tapLink(e);
 			pinchPrev = null;
 			if (touches.size === 1) primeTouchPan();
 			if (touches.size === 0) {
@@ -1591,8 +1853,9 @@
 			}
 			return;
 		}
+		if (textDrag?.pointerId === e.pointerId) return endTextDrag();
 		if (e.pointerId === panPointerId) {
-			tapLink(e);
+			if (!(coversByTap() && tapCover(local(e)))) tapLink(e);
 			panPointerId = null;
 			panLast = null;
 			panning = false;
@@ -1615,7 +1878,10 @@
 		}
 		if (e.pointerId === lassoPointerId) return endLasso();
 		if (e.pointerId === movePointerId) return endMove(e.type !== 'pointercancel');
+		if (e.pointerId === shapePointerId) return endShape(e.type !== 'pointercancel');
 		if (e.pointerId !== drawingPointerId) return;
+		// Presenting: a tap on a cover flips it rather than leaving a dot.
+		if (coverTaps && liveStroke && e.type !== 'pointercancel' && isTap(liveStroke) && tapCover(local(e))) return abortStroke();
 		if (liveStroke && liveStroke.points.length > 0) {
 			// End exactly where the pen lifted, even if that sample was too close to keep.
 			if (lastSampleSkipped) liveStroke.points.push(lastSampleSkipped);
@@ -1634,6 +1900,13 @@
 		lastSampleSkipped = null;
 		liveHoldUntil = 0;
 		onactive?.(false);
+	}
+
+	/** A stroke that never went anywhere: all its points within a tap of the first. */
+	function isTap(st: Stroke) {
+		const [a] = st.points;
+		const r = TAP_PX / viewport.scale;
+		return !!a && st.points.every((q) => Math.hypot(q.x - a.x, q.y - a.y) <= r);
 	}
 
 	function onPointerLeave(e: PointerEvent) {
@@ -1682,9 +1955,8 @@
 		pinchPrev = now;
 	}
 
-	/** Wheel scrolls like any page (Shift: sideways); Ctrl+wheel zooms at the
-	 *  cursor — which is also what a trackpad pinch sends. With the hand tool
-	 *  the plain wheel zooms too: the hand already moves the view by dragging. */
+	/** Wheel scrolls like any page (Shift: sideways), whatever the tool;
+	 *  Ctrl+wheel zooms at the cursor — which is also what a trackpad pinch sends. */
 	function onWheel(e: WheelEvent) {
 		e.preventDefault(); // or Ctrl+wheel zooms the whole browser page
 		if (inking()) return; // the view holds still under a stroke
@@ -1694,7 +1966,7 @@
 		const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? height : 1;
 		let dx = e.deltaX * unit;
 		let dy = e.deltaY * unit;
-		if (e.ctrlKey || (tool === 'hand' && !e.shiftKey)) {
+		if (e.ctrlKey) {
 			const at = local(e);
 			// A mouse notch is ~100, a pinch step a few: clamp so a notch is a step.
 			viewport.zoomAt(at.x, at.y, Math.exp(-Math.max(-25, Math.min(25, dy)) * 0.01));
@@ -1816,6 +2088,7 @@
 		laserPointerId !== null ||
 		lassoPointerId !== null ||
 		movePointerId !== null ||
+		shapePointerId !== null ||
 		panPointerId !== null ||
 		touches.size > 0;
 
@@ -2007,7 +2280,9 @@
 				? 'grab'
 				: tool === 'lasso' && (moving || overSelection)
 					? 'move'
-					: tool}
+					: tool === 'shape'
+						? 'crosshair'
+						: tool}
 	></canvas>
 	{#if selBar}
 		<div class="selbar" style:left="{selBar.left}px" style:top="{selBar.top}px">
@@ -2060,6 +2335,18 @@
 				}
 			}}
 		></textarea>
+		<div
+			class="textgrip"
+			style:left="{at.x}px"
+			style:top="{at.y}px"
+			role="button"
+			tabindex="-1"
+			aria-label="Move the text"
+			title="Drag to move the text"
+			onpointerdown={onGripDown}
+		>
+			<Icon name="move" size={14} stroke={2.25} />
+		</div>
 	{/if}
 	<div class="pills">
 		{#each pills as { page, at } (page.id)}
@@ -2167,6 +2454,22 @@
 		overflow: hidden;
 		white-space: pre;
 		min-width: 1em;
+	}
+
+	/* Grab the text being typed by its corner to move it. */
+	.textgrip {
+		position: absolute;
+		translate: calc(-100% - 8px) calc(-100% - 6px);
+		display: grid;
+		place-items: center;
+		width: 26px;
+		height: 26px;
+		border-radius: 50%;
+		background: var(--ink);
+		color: var(--chalk);
+		box-shadow: var(--shadow-float);
+		cursor: move;
+		touch-action: none;
 	}
 
 	.pills {

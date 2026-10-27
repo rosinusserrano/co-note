@@ -3,7 +3,8 @@
 // editable. It comes from a file, so everything in it is checked.
 
 import { BRUSHES } from './ink';
-import type { Brush, PageLayout, Stroke, TextBox } from './model';
+import type { Brush, PageLayout, Shape, Stroke, TextBox } from './model';
+import { isShapeKind } from './shapes';
 
 export const CONOTE_FILE = 'conote.json';
 /** The optional-content layer the drawn ink sits in; conote hides it. */
@@ -18,12 +19,15 @@ export interface ConoteData {
 	strokes: (Omit<Stroke, 'id' | 'page'> & { page: number })[];
 	/** Page-local text boxes, the same way (absent in older exports). */
 	texts: (Omit<TextBox, 'id' | 'page'> & { page: number })[];
+	/** Page-local shapes, the same way (absent in older exports). */
+	shapes: (Omit<Shape, 'id' | 'page'> & { page: number })[];
 }
 
 const MAX_STROKES = 200_000;
 const MAX_POINTS = 20_000;
 const MAX_TEXTS = 20_000;
 const MAX_TEXT = 20_000;
+const MAX_SHAPES = 20_000;
 const num = (v: unknown, lo: number, hi: number): v is number => typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi;
 
 /** The data, if `json` is conote data for a PDF of `pageCount` pages; else null. */
@@ -66,11 +70,31 @@ export function readConoteData(json: unknown, pageCount: number): ConoteData | n
 		if (!Number.isInteger(t.page) || !num(t.page, 0, pageCount - 1)) continue;
 		texts.push({ x: t.x, y: t.y, text: t.text, size: t.size, color: t.color, page: t.page as number });
 	}
+	const shapes: ConoteData['shapes'] = [];
+	for (const raw of Array.isArray(d.shapes) ? d.shapes.slice(0, MAX_SHAPES) : []) {
+		const t = raw as Record<string, unknown>;
+		if (!t || typeof t !== 'object' || !isShapeKind(t.kind)) continue;
+		if (typeof t.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(t.color) || !num(t.width, 0, 1000)) continue;
+		if (![t.x0, t.y0, t.x1, t.y1].every((v) => num(v, -1e6, 1e6))) continue;
+		if (!Number.isInteger(t.page) || !num(t.page, 0, pageCount - 1)) continue;
+		shapes.push({
+			kind: t.kind,
+			x0: t.x0 as number,
+			y0: t.y0 as number,
+			x1: t.x1 as number,
+			y1: t.y1 as number,
+			color: t.color,
+			width: t.width,
+			page: t.page as number,
+			...(t.open === true ? { open: true } : {})
+		});
+	}
 	return {
 		v: 1,
 		layout: d.layout === 'horizontal' ? 'horizontal' : 'vertical',
 		pages: d.pages.map((p) => ({ extra: !!(p as { extra?: unknown })?.extra })),
 		strokes,
-		texts
+		texts,
+		shapes
 	};
 }

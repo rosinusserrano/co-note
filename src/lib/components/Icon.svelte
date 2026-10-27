@@ -45,6 +45,16 @@
 		chevronUp: '<path d="m18 15-6-6-6 6"/>',
 		chevronDown: '<path d="m6 9 6 6 6-6"/>',
 		zoom: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M11 8v6M8 11h6"/>',
+		move: '<path d="M12 2v20"/><path d="m15 19-3 3-3-3"/><path d="m19 9 3 3-3 3"/><path d="M2 12h20"/><path d="m5 9-3 3 3 3"/><path d="m9 5 3-3 3 3"/>',
+		folder: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+		folderPlus: '<path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+		shapes: '<rect x="3" y="11" width="10" height="10" rx="1"/><circle cx="16.5" cy="7.5" r="4.5"/>',
+		rect: '<rect x="3" y="5" width="18" height="14" rx="1.5"/>',
+		cover: '<rect x="3" y="5" width="18" height="14" rx="1.5" fill="currentColor" fill-opacity="0.35"/>',
+		ellipse: '<ellipse cx="12" cy="12" rx="9.5" ry="7"/>',
+		line: '<path d="M4 20 20 4"/>',
+		arrow: '<path d="M5 19 19 5"/><path d="M9 5h10v10"/>',
+		present: '<path d="M2 3h20"/><path d="M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3"/><path d="m7 21 5-5 5 5"/>',
 		layout: '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>'
 	} as const;
 	export type IconName = keyof typeof ICONS;

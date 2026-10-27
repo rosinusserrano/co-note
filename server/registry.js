@@ -414,6 +414,9 @@ export const wasEnded = (id) => id in ended;
 
 const accountKey = (raw) => String(raw ?? '').trim().toLowerCase();
 
+/** Longest folder name; '' = no folder. */
+const FOLDER_MAX = 40;
+
 function accountNameError(key) {
 	if (!/^[a-z0-9][a-z0-9_-]{1,22}[a-z0-9]$/.test(key))
 		return 'Names are 3–24 characters: letters, digits, - and _.';
@@ -478,7 +481,7 @@ function grant(account, note, role) {
 	const prev = account.notes[note.id];
 	// Never step down: an editor who later joins with the observer passcode stays an editor.
 	if (prev && prev.role === 'edit' && role === 'view' && String(prev.epoch) === String(note.epoch.edit)) return;
-	account.notes[note.id] = { role, epoch: note.epoch[role], at: Date.now() };
+	account.notes[note.id] = { role, epoch: note.epoch[role], at: Date.now(), ...(prev?.folder ? { folder: prev.folder } : {}) };
 	saveAccounts();
 }
 
@@ -495,10 +498,11 @@ export function accountNotes(account) {
 			changed = true;
 			continue;
 		}
-		if (note.account === account.key) out.push(ownerSessionOf(note, { owned: true, at: g.at }));
-		else if (String(note.epoch[g.role]) === String(g.epoch)) out.push(session(note, g.role, { at: g.at }));
+		const extra = { at: g.at, folder: g.folder ?? '' };
+		if (note.account === account.key) out.push(ownerSessionOf(note, { owned: true, ...extra }));
+		else if (String(note.epoch[g.role]) === String(g.epoch)) out.push(session(note, g.role, extra));
 		else
-			out.push({ id, name: note.name, role: g.role, viewAccess: note.viewAccess, token: '', saved: note.keep !== 'none', locked: true, at: g.at });
+			out.push({ id, name: note.name, role: g.role, viewAccess: note.viewAccess, token: '', saved: note.keep !== 'none', locked: true, ...extra });
 	}
 	if (changed) saveAccounts();
 	return { notes: out };
@@ -520,9 +524,29 @@ export async function addToAccount(account, { notes: list }) {
 			saveRegistry();
 		}
 		grant(account, note, note.account === account.key ? 'edit' : v.role);
+		// A folder given on this device, unless the account already filed it.
+		const folder = typeof it.folder === 'string' ? it.folder.replace(/\s+/g, ' ').trim() : '';
+		const g = account.notes[note.id];
+		if (folder && folder.length <= FOLDER_MAX && !g.folder) {
+			g.folder = folder;
+			saveAccounts();
+		}
 		added.push(note.id);
 	}
 	return { added };
+}
+
+/** File a note the account holds into a folder (a name; '' takes it out).
+ *  Folders are just labels on the account's notes: none exists empty. */
+export function setFolder(account, { id, folder }) {
+	const g = account.notes[String(id ?? '')];
+	if (!g) throw new HttpError(404, "That note isn't in your account.");
+	const name = String(folder ?? '').replace(/\s+/g, ' ').trim();
+	if (name.length > FOLDER_MAX) throw new HttpError(400, `Folder names are at most ${FOLDER_MAX} characters.`);
+	if (name) g.folder = name;
+	else delete g.folder;
+	saveAccounts();
+	return { ok: true, folder: name };
 }
 
 export function forget(account, { id }) {

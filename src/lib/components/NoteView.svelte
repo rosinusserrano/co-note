@@ -30,7 +30,8 @@
 	import { PAGE_GAP } from '$lib/notes/pages';
 	import { BRUSHES, MARKER_ALPHA } from '$lib/notes/ink';
 	import { TEXT_FONT, TEXT_SIZE } from '$lib/notes/text';
-	import type { Brush } from '$lib/notes/model';
+	import type { Brush, ShapeKind } from '$lib/notes/model';
+	import { SHAPE_KINDS } from '$lib/notes/shapes';
 	import {
 		Bars,
 		ANCHORS,
@@ -59,17 +60,42 @@
 	// Each ink type (the brushes, and text) keeps its own colour and size; the
 	// palette and slider edit the current one (the last one used, while the
 	// eraser, laser or hand is active). For text the size is the font size.
-	type Ink = Brush | 'text';
+	type Ink = Brush | 'text' | 'shape';
 	const INKS: Record<Ink, { label: string; size: number; min: number; max: number }> = {
 		...BRUSHES,
-		text: { label: 'Text', ...TEXT_SIZE }
+		text: { label: 'Text', ...TEXT_SIZE },
+		shape: { label: 'Shapes', size: 2, min: 0.1, max: 16 }
 	};
 	let inks = $state<Record<Ink, { color: string; width: number }>>({
 		pen: { color: '#191814', width: BRUSHES.pen.size },
 		brush: { color: '#191814', width: BRUSHES.brush.size },
 		marker: { color: '#f2c230', width: BRUSHES.marker.size },
-		text: { color: '#191814', width: TEXT_SIZE.size }
+		text: { color: '#191814', width: TEXT_SIZE.size },
+		shape: { color: '#191814', width: 2 }
 	});
+
+	/** Which shape the shape tool draws (per device, remembered). */
+	const SHAPE_KEY = 'conote:shape';
+	const SHAPE_ICON: Record<ShapeKind, IconName> = { rect: 'rect', ellipse: 'ellipse', line: 'line', arrow: 'arrow', cover: 'cover' };
+	let shapeKind = $state<ShapeKind>(
+		(() => {
+			try {
+				const v = localStorage.getItem(SHAPE_KEY);
+				return SHAPE_KINDS.some((k) => k.id === v) ? (v as ShapeKind) : 'rect';
+			} catch {
+				return 'rect';
+			}
+		})()
+	);
+	function pickShape(k: ShapeKind) {
+		shapeKind = k;
+		writeLocal(SHAPE_KEY, k);
+		pickTool('shape');
+	}
+	/** A tool's icon: the shape tool shows the shape it draws. */
+	const toolIcon = (t: { id: Tool; icon: IconName }) => (t.id === 'shape' ? SHAPE_ICON[shapeKind] : t.icon);
+	/** A saved ink's icon. */
+	const inkIcon = (b: Ink): IconName => (b === 'shape' ? 'shapes' : b);
 	/** The current ink type. */
 	let brush = $state<Ink>('pen');
 	const color = $derived(inks[brush].color);
@@ -80,7 +106,8 @@
 		{ id: 'pen', icon: 'pen', label: 'Pen', key: 'P' },
 		{ id: 'brush', icon: 'brush', label: 'Brush', key: 'B' },
 		{ id: 'marker', icon: 'marker', label: 'Marker', key: 'M' },
-		{ id: 'text', icon: 'text', label: 'Text', key: 'T', hint: 'tap to type, tap a text to change it' },
+		{ id: 'text', icon: 'text', label: 'Text', key: 'T', hint: 'tap to type, tap a text to change it; drag to move it' },
+		{ id: 'shape', icon: 'shapes', label: 'Shapes', key: 'R', hint: 'drag out a shape (Shift: straight); tap a cover to lift it or put it back' },
 		{ id: 'eraser', icon: 'eraser', label: 'Eraser', key: 'E' },
 		{ id: 'lasso', icon: 'lasso', label: 'Lasso', key: 'S', hint: 'circle ink to move, copy or delete it; tap to paste' },
 		{ id: 'laser', icon: 'laser', label: 'Laser', key: 'L', hint: 'hold to point, everyone sees a fading trail' },
@@ -135,15 +162,31 @@
 	/** A preset's icon grows with its thickness, within its brush's range. */
 	const presetSize = (p: Preset) => {
 		const b = INKS[p.brush];
-		return Math.round(12 + (10 * (p.width - b.min)) / (b.max - b.min));
+		return Math.round(12 + 10 * sizeAt(p.brush, p.width));
 	};
+
+	// The size slider is logarithmic: the range spans 0.1 to 60 pt, and a
+	// fine pen for drawing zoomed in needs as much travel as a fat marker.
+	const SLIDER_STEPS = 1000;
+	/** Where a size sits in its ink's range, 0..1 (log scale). */
+	const sizeAt = (ink: Ink, w: number) => {
+		const b = INKS[ink];
+		return Math.log(w / b.min) / Math.log(b.max / b.min);
+	};
+	/** The size at slider position `k` (0..1), rounded to two significant digits. */
+	const sizeFrom = (ink: Ink, k: number) => {
+		const b = INKS[ink];
+		const w = Number((b.min * (b.max / b.min) ** k).toPrecision(2));
+		return Math.min(b.max, Math.max(b.min, w));
+	};
+	const showSize = (w: number) => (w < 1 ? String(Number(w.toFixed(2))) : w.toFixed(1));
 
 	function pickColor(c: string) {
 		inks[brush].color = c;
 		if (!isBrush(tool)) tool = brush; // picking a colour means "draw with it"
 	}
 	/** A tool that puts something down in the current ink. */
-	const isBrush = (t: Tool): t is Ink => t === 'pen' || t === 'brush' || t === 'marker' || t === 'text';
+	const isBrush = (t: Tool): t is Ink => t === 'pen' || t === 'brush' || t === 'marker' || t === 'text' || t === 'shape';
 	function pickTool(t: Tool) {
 		if (isBrush(t)) brush = t;
 		tool = t;
@@ -329,7 +372,7 @@
 	})();
 	onMount(() => {
 		const unblock = appUpdate.block(
-			() => inking || pdfBusy !== '' || showSettings || customizing || pop === 'keep' || pop === 'zotero'
+			() => inking || presenting || pdfBusy !== '' || showSettings || customizing || pop === 'keep' || pop === 'zotero'
 		);
 		const unsave = appUpdate.beforeReload(() => {
 			const r: Resume = {
@@ -392,7 +435,80 @@
 			fullscreenByFocus = false;
 			setFocus(false);
 		}
+		// …and the same for presenting.
+		if (!document.fullscreenElement && fullscreenByPresent) {
+			fullscreenByPresent = false;
+			stopPresenting();
+		}
 	}
+
+	// --- Presenting: the pages one at a time, full screen, like slides --------
+
+	/** Presenting: chrome gone, a dark desk, the view held on one page. */
+	let presenting = $state(false);
+	/** Which page is the slide (index in export order). */
+	let slide = $state(0);
+	/** False once the view was moved by hand: it stays put until the next slide. */
+	let slideHeld = $state(true);
+	/** The owner's slides bring everyone else along (a pull per slide). */
+	let bringAlong = $state(true);
+	let fullscreenByPresent = false;
+	const slidePage = $derived(presenting ? noteStore.pages[Math.min(slide, noteStore.pages.length - 1)] : undefined);
+	const slideId = $derived(slidePage?.id);
+
+	function startPresenting() {
+		const pages = noteStore.pages;
+		if (pages.length === 0 || presenting) return;
+		if (focus) setFocus(false);
+		// Start on the page nearest the middle of the screen.
+		const v = viewport.visible(canvasWidth, canvasHeight);
+		const cx = v.x + v.w / 2;
+		const cy = v.y + v.h / 2;
+		let best = 0;
+		pages.forEach((p, i) => {
+			const d = (q: (typeof pages)[number]) => Math.hypot(q.x + q.w / 2 - cx, q.y + q.h / 2 - cy);
+			if (d(p) < d(pages[best])) best = i;
+		});
+		slide = best;
+		slideHeld = true;
+		follow = null;
+		pop = '';
+		presenting = true;
+		revealFocusBar();
+		const el = document.documentElement;
+		if (!document.fullscreenElement && el.requestFullscreen) {
+			el.requestFullscreen()
+				.then(() => (fullscreenByPresent = true))
+				.catch(() => {
+					/* not allowed here: present without it */
+				});
+		}
+	}
+
+	function stopPresenting() {
+		if (!presenting) return;
+		presenting = false;
+		clearTimeout(focusBarTimer);
+		if (fullscreenByPresent && document.fullscreenElement) document.exitFullscreen().catch(() => {});
+		fullscreenByPresent = false;
+	}
+
+	function goSlide(i: number) {
+		const n = noteStore.pages.length;
+		if (n === 0) return;
+		slide = Math.max(0, Math.min(n - 1, i));
+		slideHeld = true; // even on the same slide: back to it after wandering off
+	}
+
+	// A new slide on the owner's screen: everyone else goes there too.
+	$effect(() => {
+		const id = slideId;
+		if (!id || !owner || !bringAlong) return;
+		untrack(() => {
+			const p = noteStore.pages.find((q) => q.id === id);
+			if (p && noteStore.peers > 1 && noteStore.access === 'ok') noteStore.pullEveryone({ x: p.x, y: p.y, w: p.w, h: p.h });
+		});
+	});
 
 	onMount(() => {
 		noteIndex.touch(entry.id);
@@ -420,7 +536,7 @@
 		return () => {
 			document.removeEventListener('fullscreenchange', onFullscreenChange);
 			clearTimeout(focusBarTimer);
-			if (fullscreenByFocus && document.fullscreenElement) document.exitFullscreen().catch(() => {});
+			if ((fullscreenByFocus || fullscreenByPresent) && document.fullscreenElement) document.exitFullscreen().catch(() => {});
 			noteStore.disconnect();
 		};
 	});
@@ -476,6 +592,12 @@
 	$effect(() => {
 		const canvas = canvasRef;
 		if (!canvas) return;
+		if (presenting) {
+			const p = slidePage;
+			if (p && slideHeld) canvas.follow({ x0: p.x, y0: p.y, x1: p.x + p.w, y1: p.y + p.h }, 10);
+			else canvas.follow(null);
+			return;
+		}
 		const id = follow;
 		if (id === 'drawing') {
 			void noteStore.revision;
@@ -529,11 +651,15 @@
 			};
 		});
 
-	async function importPdf(e: Event) {
+	function onPdfPicked(e: Event) {
 		const input = e.currentTarget as HTMLInputElement;
 		const file = input.files?.[0];
 		input.value = ''; // the same file can be picked again
-		if (!file) return;
+		if (file) void importPdf(file);
+	}
+
+	async function importPdf(file: File) {
+		if (pdfBusy) return;
 		pdfBusy = 'import';
 		pdfError = '';
 		const hadPages = noteStore.pages.length > 0;
@@ -549,6 +675,41 @@
 		} finally {
 			pdfBusy = '';
 		}
+	}
+
+	// Dropping a PDF file onto the note imports it, like ⋯ → Import PDF.
+	/** A file is being dragged over the note (the drop hint shows). */
+	let dropping = $state(false);
+	let dragDepth = 0;
+	const draggingFiles = (e: DragEvent) => !!e.dataTransfer?.types.includes('Files');
+	const canDrop = () => canEdit && noteStore.access === 'ok';
+
+	function onDragEnter(e: DragEvent) {
+		if (!draggingFiles(e) || !canDrop()) return;
+		e.preventDefault();
+		dragDepth++;
+		dropping = true;
+	}
+	function onDragOver(e: DragEvent) {
+		if (!draggingFiles(e) || !canDrop()) return;
+		e.preventDefault(); // or the browser opens the file itself
+		e.dataTransfer!.dropEffect = 'copy';
+	}
+	function onDragLeave(e: DragEvent) {
+		if (!draggingFiles(e)) return;
+		dragDepth = Math.max(0, dragDepth - 1);
+		if (dragDepth === 0) dropping = false;
+	}
+	function onDrop(e: DragEvent) {
+		dragDepth = 0;
+		dropping = false;
+		if (!draggingFiles(e)) return;
+		e.preventDefault();
+		if (!canDrop()) return;
+		const files = [...(e.dataTransfer?.files ?? [])];
+		const file = files.find((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+		if (file) void importPdf(file);
+		else if (files.length > 0) pdfError = 'Only PDF files can be dropped here.';
 	}
 
 	async function exportPdf() {
@@ -806,13 +967,27 @@
 			return;
 		}
 		if (mod || e.altKey) return;
+		if (e.key === 'F5') {
+			e.preventDefault(); // not a reload
+			return presenting ? stopPresenting() : startPresenting();
+		}
+		// Presenting: arrows, Page Up / Down (what clickers send), Home / End.
+		if (presenting && !pop) {
+			const step = { ArrowRight: 1, ArrowDown: 1, PageDown: 1, ArrowLeft: -1, ArrowUp: -1, PageUp: -1 }[e.key];
+			if (step || e.key === 'Home' || e.key === 'End') {
+				e.preventDefault();
+				revealFocusBar();
+				return goSlide(e.key === 'Home' ? 0 : e.key === 'End' ? noteStore.pages.length - 1 : slide + step!);
+			}
+			if (e.key === 'Escape') return stopPresenting();
+		}
 		if (e.key === 'Escape') {
 			if (customizing) setCustomizing(false);
 			else if (pop) pop = '';
 			else if (focus) setFocus(false);
 			return;
 		}
-		if (k === 'f') return setFocus(!focus);
+		if (k === 'f' && !presenting) return setFocus(!focus);
 		if (k === '0') return resetView();
 		if (k === '1') {
 			follow = null;
@@ -856,7 +1031,7 @@
 	});
 
 	function onWindowPointerDown(e: PointerEvent) {
-		if (focus) revealFocusBar();
+		if (focus || presenting) revealFocusBar();
 		if (pop && !(e.target as Element | null)?.closest?.('[data-pop]')) pop = '';
 	}
 
@@ -897,7 +1072,10 @@
 	function stubIcon(a: Anchor): IconName | null {
 		const first = shown(a)[0];
 		if (shown(a).includes('title')) return null;
-		if (first === 'tools') return TOOLS.find((t) => t.id === tool)?.icon ?? 'pen';
+		if (first === 'tools') {
+			const t = TOOLS.find((t) => t.id === tool);
+			return t ? toolIcon(t) : 'pen';
+		}
 		return first === 'view' ? 'zoom' : 'users';
 	}
 	const groupLabel = (a: Anchor) => shown(a).map((id) => BAR_NAMES[id]).join(' + ');
@@ -1082,34 +1260,54 @@
 	onkeydown={onKey}
 	onpointerdown={onWindowPointerDown}
 	onpointermove={(e) => {
-		if (focus) revealFocusBar();
+		if (focus || presenting) revealFocusBar();
 		moveDrag(e);
 	}}
 	onpointerup={endDrag}
 	onpointercancel={() => (drag = null)}
 />
 
-<div class="app" class:inking class:focus class:customizing class:idle={focus && !focusBar}>
+<div
+	class="app"
+	class:inking
+	class:focus
+	class:customizing
+	class:presenting
+	class:idle={(focus || presenting) && !focusBar}
+	role="application"
+	ondragenter={onDragEnter}
+	ondragover={onDragOver}
+	ondragleave={onDragLeave}
+	ondrop={onDrop}
+>
 	<main class="stage">
 		<DrawingCanvas
 			bind:this={canvasRef}
 			{viewport}
 			mode={effectiveMode}
 			{tool}
+			{shapeKind}
 			{color}
 			{strokeWidth}
 			showPresence={showOthers}
-			showViews={!focus}
-			{pageDots}
+			showViews={!focus && !presenting}
+			pageDots={pageDots && !presenting}
+			desk={presenting ? 'dark' : 'paper'}
+			labels={!presenting}
+			coverTaps={presenting}
+			openCovers={!presenting}
 			bind:width={canvasWidth}
 			bind:height={canvasHeight}
-			onnavigate={() => (follow = null)}
+			onnavigate={() => {
+				follow = null;
+				if (presenting) slideHeld = false;
+			}}
 			onactive={(on) => {
 				inking = on;
 				if (on) pop = '';
 			}}
-			pageActions={canEdit && effectiveMode === 'draw'}
-			{snap}
+			pageActions={canEdit && effectiveMode === 'draw' && !presenting}
+			snap={snap && !presenting}
 			{fingerInks}
 			onpen={onPen}
 			penButton={penButtonUse}
@@ -1169,6 +1367,12 @@
 					<Icon name={pullSent ? 'check' : 'gather'} />
 				</button>
 			{/if}
+			{#if noteStore.pages.length > 0 && bars.profile === 'wide'}
+				<!-- Phones have it in the ⋯ menu: no room up here. -->
+				<button class="ibtn" onclick={startPresenting} title="Present (F5): the pages one at a time, full screen" aria-label="Present">
+					<Icon name="present" />
+				</button>
+			{/if}
 			<button class="ibtn" onclick={() => setFocus(true)} title="Focus mode (F): only the note, following along" aria-label="Focus mode">
 				<Icon name="focus" />
 			</button>
@@ -1211,7 +1415,7 @@
 					aria-label={t.label}
 					aria-pressed={tool === t.id}
 				>
-					<Icon name={t.icon} size={21} />
+					<Icon name={toolIcon(t)} size={21} />
 					{#if isBrush(t.id)}
 						<span class="tip" style:background={inks[t.id].color}></span>
 					{/if}
@@ -1297,7 +1501,7 @@
 
 	{#snippet presetMark(p: Preset)}
 		<!-- The brush's icon in the saved colour, sized by thickness, on paper so any colour shows. -->
-		<span class="dish" style:color={p.color}><Icon name={p.brush} size={presetSize(p)} stroke={2.25} /></span>
+		<span class="dish" style:color={p.color}><Icon name={inkIcon(p.brush)} size={presetSize(p)} stroke={2.25} /></span>
 	{/snippet}
 
 	{#snippet tucker(a: Anchor)}
@@ -1306,7 +1510,7 @@
 		</button>
 	{/snippet}
 
-	{#if !focus}
+	{#if !focus && !presenting}
 		<div class="edge top" bind:clientWidth={rowWidth} transition:fly={{ y: -16, duration: 260 }}>
 			{@render group('top-start')}
 			{@render group('top-center')}
@@ -1343,11 +1547,25 @@
 			<div class="pop inkpop" style={popStyle} data-pop transition:scale={{ start: 0.96, duration: 160 }}>
 				<div class="pophead">
 					<span class="serif">{INKS[brush].label}</span>
-					<span class="kicker">{strokeWidth.toFixed(1)} pt</span>
+					<span class="kicker">{showSize(strokeWidth)} pt</span>
 				</div>
 				<svg class="preview" viewBox="0 0 240 70" aria-hidden="true">
 					{#if brush === 'text'}
 						<text x="14" y="46" fill={color} font-family={TEXT_FONT} font-size={Math.min(strokeWidth * 1.4, 44)}>Text Aa</text>
+					{:else if brush === 'shape'}
+						{@const w = Math.max(0.8, Math.min(strokeWidth, 10))}
+						{#if shapeKind === 'cover'}
+							<rect x="60" y="12" width="120" height="46" rx="2" fill={color} stroke="rgb(25 24 20 / 0.2)" stroke-width="1" />
+						{:else if shapeKind === 'rect'}
+							<rect x="60" y="14" width="120" height="42" fill="none" stroke={color} stroke-width={w} stroke-linejoin="round" />
+						{:else if shapeKind === 'ellipse'}
+							<ellipse cx="120" cy="35" rx="62" ry="23" fill="none" stroke={color} stroke-width={w} />
+						{:else}
+							<path d="M40 56 L200 14" fill="none" stroke={color} stroke-width={w} stroke-linecap="round" />
+							{#if shapeKind === 'arrow'}
+								<path d="M176 12 L200 14 L188 35" fill="none" stroke={color} stroke-width={w} stroke-linecap="round" stroke-linejoin="round" />
+							{/if}
+						{/if}
 					{:else}
 						<path
 							d="M14 48 C 46 10, 78 12, 104 34 S 168 62, 226 22"
@@ -1359,15 +1577,34 @@
 						/>
 					{/if}
 				</svg>
-				<input
-					class="size"
-					type="range"
-					min={INKS[brush].min}
-					max={INKS[brush].max}
-					step="0.5"
-					bind:value={inks[brush].width}
-					aria-label={`${INKS[brush].label} size`}
-				/>
+				{#if brush === 'shape'}
+					<div class="kinds" role="radiogroup" aria-label="Shape">
+						{#each SHAPE_KINDS as k (k.id)}
+							<button
+								role="radio"
+								aria-checked={shapeKind === k.id}
+								class:on={shapeKind === k.id}
+								onclick={() => pickShape(k.id)}
+								title={k.id === 'cover' ? 'Cover: hides what’s under it until a tap lifts it (for everyone)' : k.label}
+								aria-label={k.label}
+							>
+								<Icon name={SHAPE_ICON[k.id]} size={18} />
+							</button>
+						{/each}
+					</div>
+				{/if}
+				{#if !(brush === 'shape' && shapeKind === 'cover')}
+					<input
+						class="size"
+						type="range"
+						min="0"
+						max={SLIDER_STEPS}
+						step="1"
+						value={Math.round(sizeAt(brush, strokeWidth) * SLIDER_STEPS)}
+						oninput={(e) => (inks[brush].width = sizeFrom(brush, +e.currentTarget.value / SLIDER_STEPS))}
+						aria-label={`${INKS[brush].label} size`}
+					/>
+				{/if}
 				<div class="swatches">
 					{#each palette as c (c)}
 						<button
@@ -1642,6 +1879,14 @@
 					</button>
 				{/if}
 				<span class="kicker sect">Screen</span>
+				<button
+					class="item"
+					disabled={noteStore.pages.length === 0}
+					onclick={startPresenting}
+					title={noteStore.pages.length ? 'The pages one at a time, full screen; a tap on a cover lifts it' : 'Import a PDF first: its pages are the slides'}
+				>
+					<Icon name="present" size={18} /><span>Present</span><span class="kicker">{noteStore.pages.length ? 'F5' : 'needs pages'}</span>
+				</button>
 				<button class="item" onclick={() => setCustomizing(true)} title="Move the bars to other edges and corners, join them, tuck them away (this device)">
 					<Icon name="layout" size={18} /><span>Customize bars</span><span class="kicker">move · join</span>
 				</button>
@@ -1685,7 +1930,7 @@
 					</button>
 					<button
 						class="item"
-						disabled={noteStore.strokeCount + noteStore.textCount === 0}
+						disabled={noteStore.strokeCount + noteStore.textCount + noteStore.shapeCount === 0}
 						onclick={() => {
 							noteStore.clear();
 							pop = '';
@@ -1707,8 +1952,8 @@
 					</button>
 				{/if}
 				<p class="fine kicker keys">
-					{#if canEdit}<span>P B M T E S L H — tools · Ctrl Z — undo</span>{/if}
-					<span>F — focus · 1 — fit · 0 — 100% · ± — zoom</span>
+					{#if canEdit}<span>P B M T R E S L H — tools · Ctrl Z — undo</span>{/if}
+					<span>F — focus · F5 — present · 1 — fit · 0 — 100% · ± — zoom</span>
 				</p>
 				<p class="fine kicker build">conote · build {__BUILD_ID__}</p>
 			</div>
@@ -1716,7 +1961,7 @@
 	{/if}
 
 	{#if canEdit}
-		<input type="file" accept="application/pdf,.pdf" hidden bind:this={pdfInput} onchange={importPdf} />
+		<input type="file" accept="application/pdf,.pdf" hidden bind:this={pdfInput} onchange={onPdfPicked} />
 	{/if}
 
 	<!-- Customising the bars: where a dragged bar would land. -->
@@ -1736,6 +1981,12 @@
 				{BAR_NAMES[drag.id]}{drag.to ? ` → ${ANCHOR_NAMES[drag.to]}` : ''}
 			</div>
 		{/if}
+	{/if}
+
+	{#if dropping}
+		<div class="dropzone" transition:scale={{ start: 0.98, duration: 140 }}>
+			<span class="droplabel"><Icon name="fileUp" size={22} /><span class="serif">Drop a PDF to add its pages</span></span>
+		</div>
 	{/if}
 
 	<!-- Focus mode: one quiet bar that comes and goes with movement. -->
@@ -1776,8 +2027,80 @@
 		</div>
 	{/if}
 
+	<!-- Presenting: slide controls and a few tools, coming and going like focus mode's bar. -->
+	{#if presenting && focusBar}
+		<div
+			class="chrome focusbar presentbar"
+			role="toolbar"
+			tabindex="-1"
+			aria-label="Presenting"
+			transition:fly={{ y: 20, duration: 240 }}
+			onpointerenter={() => {
+				overFocusBar = true;
+				clearTimeout(focusBarTimer);
+			}}
+			onpointerleave={() => {
+				overFocusBar = false;
+				revealFocusBar();
+			}}
+		>
+			<button class="ibtn" onclick={() => goSlide(slide - 1)} disabled={slide <= 0} title="Previous page (←, Page Up)" aria-label="Previous page">
+				<Icon name="chevronLeft" />
+			</button>
+			<span class="slideno kicker"><b>{Math.min(slide, noteStore.pages.length - 1) + 1}</b> / {noteStore.pages.length}</span>
+			<button
+				class="ibtn"
+				onclick={() => goSlide(slide + 1)}
+				disabled={slide >= noteStore.pages.length - 1}
+				title="Next page (→, Page Down)"
+				aria-label="Next page"
+			>
+				<Icon name="chevronRight" />
+			</button>
+			{#if !slideHeld}
+				<button class="word" onclick={() => goSlide(slide)} title="Back to the whole page">Fit</button>
+			{/if}
+			{#if canEdit && effectiveMode === 'draw'}
+				<span class="vr"></span>
+				{#each TOOLS.filter((t) => ['pen', 'marker', 'laser', 'eraser', 'hand'].includes(t.id)) as t (t.id)}
+					<button
+						class="tool"
+						class:on={tool === t.id}
+						onclick={() => pickTool(t.id)}
+						title={`${t.label} (${t.key})`}
+						aria-label={t.label}
+						aria-pressed={tool === t.id}
+					>
+						<Icon name={toolIcon(t)} size={19} />
+						{#if isBrush(t.id)}
+							<span class="tip" style:background={inks[t.id].color}></span>
+						{/if}
+					</button>
+				{/each}
+				<button class="tool" onclick={() => noteStore.undo()} disabled={!noteStore.canUndo} title="Undo (Ctrl+Z)" aria-label="Undo">
+					<Icon name="undo" size={19} />
+				</button>
+			{/if}
+			{#if owner}
+				<span class="vr"></span>
+				<button
+					class="word"
+					class:on={bringAlong}
+					onclick={() => (bringAlong = !bringAlong)}
+					title="Each page you turn to brings everyone else's view along"
+				>
+					Everyone follows
+				</button>
+			{/if}
+			<span class="vr"></span>
+			<button class="exit" onclick={stopPresenting} title="Stop presenting (Esc)">
+				<span class="kicker">End</span><Icon name="x" size={16} />
+			</button>
+		</div>
+	{/if}
+
 	<!-- Notices, top centre. -->
-	<div class="notices" aria-live="polite" style:--toprow="{focus ? 0 : rows.height.top}px">
+	<div class="notices" aria-live="polite" style:--toprow="{focus || presenting ? 0 : rows.height.top}px">
 		{#if customizing && !focus}
 			<div class="notice custom" role="status" transition:fly={{ y: -12, duration: 220 }}>
 				<span class="kicker lime">Bars</span>
@@ -1873,6 +2196,30 @@
 		cursor: none !important;
 	}
 
+	/* A PDF dragged over the note: where it would go. */
+	.dropzone {
+		position: absolute;
+		inset: 10px;
+		z-index: 6;
+		display: grid;
+		place-items: center;
+		border: 2px dashed var(--ink);
+		border-radius: 18px;
+		background: rgb(214 242 75 / 0.18);
+		pointer-events: none;
+	}
+	.droplabel {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		padding: 0.7rem 1.2rem;
+		border-radius: 999px;
+		background: var(--ink);
+		color: var(--chalk);
+		box-shadow: var(--shadow-float);
+		font-size: 1.3rem;
+	}
+
 	/* --- Floating chrome: ink capsules over the paper ---------------------- */
 
 	.chrome {
@@ -1890,7 +2237,8 @@
 		transition: opacity 0.45s var(--ease-out) 0.55s;
 	}
 	/* While the pen is down the chrome steps back (and lets the pen through). */
-	.app.inking .chrome:not(.focusbar) {
+	.app.inking .chrome:not(.focusbar),
+	.app.inking .presentbar {
 		opacity: 0.1;
 		pointer-events: none;
 		transition: opacity 0.2s ease 0.15s;
@@ -2679,6 +3027,32 @@
 		background: var(--ink);
 		border: 3px solid var(--lime);
 	}
+	/* Which shape the shape tool draws. */
+	.kinds {
+		display: grid;
+		grid-template-columns: repeat(5, 1fr);
+		gap: 2px;
+		padding: 3px;
+		border-radius: 999px;
+		background: var(--paper-2);
+	}
+	.kinds button {
+		display: grid;
+		place-items: center;
+		height: 32px;
+		border: none;
+		border-radius: 999px;
+		background: transparent;
+		color: var(--graphite);
+		cursor: pointer;
+	}
+	.kinds button:hover {
+		color: var(--ink);
+	}
+	.kinds button.on {
+		background: var(--lime);
+		color: var(--ink);
+	}
 	.swatches {
 		display: grid;
 		grid-template-columns: repeat(9, 1fr);
@@ -3036,6 +3410,27 @@
 		padding: 4px 4px 4px 0.9rem;
 		gap: 0.5rem;
 		border-radius: 999px;
+	}
+	.presentbar {
+		/* Sized by its content, not by the half screen right of `left: 50%`. */
+		width: max-content;
+		padding: 4px;
+		gap: 2px;
+		overflow-x: auto;
+		scrollbar-width: none;
+	}
+	.presentbar > * {
+		flex: none;
+	}
+	.slideno {
+		padding: 0 0.4rem;
+		white-space: nowrap;
+		color: var(--smoke);
+		font-variant-numeric: tabular-nums;
+	}
+	.slideno b {
+		color: var(--chalk);
+		font-weight: 500;
 	}
 	.fname {
 		display: flex;

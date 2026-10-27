@@ -27,6 +27,8 @@ export interface NoteSession {
 	locked?: boolean;
 	/** No editor passcode: only the account it belongs to opens it. */
 	private?: boolean;
+	/** The account's folder for it ('' = none); only from the account's list. */
+	folder?: string;
 }
 
 /** What the owner key gets: an editor session plus the owner proof (see
@@ -191,10 +193,12 @@ export const login = (name: string, password: string) => post<AccountSession>('/
 export const accountNotes = () => post<{ notes: (NoteSession & { ownerProof?: string; at?: number })[] }>('/account/notes', {});
 
 /** Bring notes this device holds (tokens, and owner keys) into the account. */
-export const addToAccount = (notes: { id: string; token: string; ownerKey?: string }[]) =>
+export const addToAccount = (notes: { id: string; token: string; ownerKey?: string; folder?: string }[]) =>
 	post<{ added: string[] }>('/account/add', { notes });
 
 export const forgetInAccount = (id: string) => post<{ ok: true }>('/account/forget', { id });
+/** File one of the account's notes into a folder ('' = none). */
+export const setNoteFolder = (id: string, folder: string) => post<{ ok: true; folder: string }>('/account/folder', { id, folder });
 export const getVault = () => post<{ vault: string | null }>('/account/vault', {});
 export const setVault = (vault: string) => post<{ ok: true }>('/account/vault/set', { vault });
 

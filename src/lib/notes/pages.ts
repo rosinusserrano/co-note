@@ -10,9 +10,10 @@
 //
 // Ink on a page is page-local, so recomputing this never moves ink off its page.
 
-import type { PageEntry, PageLayout, Stroke, TextBox } from './model';
+import type { PageEntry, PageLayout, Shape, Stroke, TextBox } from './model';
 import type { Box } from './viewport.svelte';
 import { textBounds } from './text';
+import { shapeBounds } from './shapes';
 
 /** Space between pages, world units (= PDF points at 100%). Leaves room for
  *  the page label above each page. */
@@ -56,7 +57,7 @@ export function pageAt(pages: PlacedPage[], wx: number, wy: number): PlacedPage 
 /** World-space bounds of the pages, all visible ink (half a stroke's width
  *  included) and text, or null for an empty note. Ink on a deleted page
  *  doesn't count. */
-export function contentBounds(strokes: Stroke[], pages: PlacedPage[], texts: TextBox[] = []): Box | null {
+export function contentBounds(strokes: Stroke[], pages: PlacedPage[], texts: TextBox[] = [], shapes: Shape[] = []): Box | null {
 	const byId = new Map(pages.map((p) => [p.id, p]));
 	let x0 = Infinity;
 	let y0 = Infinity;
@@ -99,6 +100,15 @@ export function contentBounds(strokes: Stroke[], pages: PlacedPage[], texts: Tex
 		y0 = Math.min(y0, b.y + dy);
 		x1 = Math.max(x1, b.x + b.w + dx);
 		y1 = Math.max(y1, b.y + b.h + dy);
+	}
+	for (const sh of shapes) {
+		const p = sh.page ? byId.get(sh.page) : null;
+		if (p === undefined) continue; // on a deleted page
+		const b = shapeBounds(sh);
+		x0 = Math.min(x0, b.x0 + (p?.x ?? 0));
+		y0 = Math.min(y0, b.y0 + (p?.y ?? 0));
+		x1 = Math.max(x1, b.x1 + (p?.x ?? 0));
+		y1 = Math.max(y1, b.y1 + (p?.y ?? 0));
 	}
 	return x0 <= x1 ? { x0, y0, x1, y1 } : null;
 }

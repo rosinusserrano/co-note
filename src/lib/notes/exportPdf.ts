@@ -3,6 +3,9 @@
 // were added, and the ink on top as vector paths. Ink is page-local, so on each
 // page it's drawn through one transform: page-local → that page's PDF space.
 //
+// Shapes go into it too, under the text: outlines as paths, covers as filled
+// boxes (a lifted cover isn't drawn, but conote.json keeps it, lifted).
+//
 // Text boxes go into the same ink stream, in Helvetica (a standard font, so
 // nothing is embedded; the canvas uses Arimo, which has the same widths).
 // Characters Helvetica can't encode (outside Latin-1, roughly) become "?" in
@@ -24,10 +27,11 @@
 // pdf-lib is loaded on first use.
 
 import type { PDFDocument, PDFFont, PDFPage, PDFOperator, PDFRef } from 'pdf-lib';
-import type { PageEntry, PageLayout, Stroke, TextBox } from './model';
+import type { PageEntry, PageLayout, Shape, Stroke, TextBox } from './model';
 import { TEXT_ASCENT, TEXT_LINE, textBounds, textLines } from './text';
 import { inkShape, hexToRgb, isMarker, MARKER_ALPHA, type InkRun } from './ink';
 import { CONOTE_FILE, CONOTE_LAYER, type ConoteData } from './conoteData';
+import { arrowHead, ellipseCurves, shapeBounds, shapeBox } from './shapes';
 
 type Mat = [number, number, number, number, number, number];
 
@@ -43,6 +47,7 @@ export async function exportPdf(
 	pages: PageEntry[],
 	strokes: Stroke[],
 	texts: TextBox[],
+	shapes: Shape[],
 	getFile: (hash: string) => Promise<Uint8Array>,
 	layout: PageLayout = 'vertical'
 ): Promise<Uint8Array> {
@@ -57,7 +62,19 @@ export async function exportPdf(
 	out.catalog.set(PDFName.of('OCProperties'), ctx.obj({ OCGs: [layer], D: { Order: [layer] } }));
 
 	/** The ink again, as data: per page in export order. */
-	const data: ConoteData = { v: 1, layout, pages: [], strokes: [], texts: [] };
+	const data: ConoteData = { v: 1, layout, pages: [], strokes: [], texts: [], shapes: [] };
+	const keepShape = (s: Shape, page: number, dx = 0, dy = 0) =>
+		data.shapes.push({
+			kind: s.kind,
+			x0: round(s.x0 + dx, 100),
+			y0: round(s.y0 + dy, 100),
+			x1: round(s.x1 + dx, 100),
+			y1: round(s.y1 + dy, 100),
+			color: s.color,
+			width: s.width,
+			page,
+			...(s.open ? { open: true } : {})
+		});
 	const keepText = (t: TextBox, page: number, dx = 0, dy = 0) =>
 		data.texts.push({ x: round(t.x + dx, 100), y: round(t.y + dy, 100), text: t.text, size: t.size, color: t.color, page });
 	// Loaded only if there is text.
@@ -95,22 +112,31 @@ export async function exportPdf(
 		if (!list) textOn.set(key, (list = []));
 		list.push(t);
 	}
+	const shapesOn = new Map<string, Shape[]>();
+	for (const sh of shapes) {
+		const key = sh.page ?? '';
+		let list = shapesOn.get(key);
+		if (!list) shapesOn.set(key, (list = []));
+		list.push(sh);
+	}
 
 	if (pages.length === 0) {
 		const free = onPage.get('') ?? [];
 		const freeText = textOn.get('') ?? [];
-		const b = bounds(free, freeText);
+		const freeShapes = shapesOn.get('') ?? [];
+		const b = bounds(free, freeText, freeShapes);
 		if (!b) {
 			out.addPage(); // nothing drawn: one empty page rather than an invalid PDF
 		} else {
 			const w = b.x1 - b.x0 + 2 * MARGIN;
 			const h = b.y1 - b.y0 + 2 * MARGIN;
 			const page = out.addPage([w, h]);
-			drawInk(lib, page, free, freeText, font, [1, 0, 0, -1, MARGIN - b.x0, h - MARGIN + b.y0], layer);
+			drawInk(lib, page, free, freeText, freeShapes, font, [1, 0, 0, -1, MARGIN - b.x0, h - MARGIN + b.y0], layer);
 			// Reopened, it's ink on this page: page-local, from its top-left.
 			data.pages.push({ extra: false });
 			for (const s of free) keep(s, 0, MARGIN - b.x0, MARGIN - b.y0);
 			for (const t of freeText) keepText(t, 0, MARGIN - b.x0, MARGIN - b.y0);
+			for (const sh of freeShapes) keepShape(sh, 0, MARGIN - b.x0, MARGIN - b.y0);
 		}
 		return finish();
 	}
@@ -146,10 +172,11 @@ export async function exportPdf(
 			page = out.addPage([p.w, p.h]);
 			m = [1, 0, 0, -1, 0, p.h]; // page-local is y-down from the top-left
 		}
-		drawInk(lib, page, onPage.get(p.id) ?? [], textOn.get(p.id) ?? [], font, m, layer);
+		drawInk(lib, page, onPage.get(p.id) ?? [], textOn.get(p.id) ?? [], shapesOn.get(p.id) ?? [], font, m, layer);
 		data.pages.push({ extra: p.extra });
 		for (const s of onPage.get(p.id) ?? []) keep(s, index);
 		for (const t of textOn.get(p.id) ?? []) keepText(t, index);
+		for (const sh of shapesOn.get(p.id) ?? []) keepShape(sh, index);
 	}
 	return finish();
 }
@@ -159,11 +186,18 @@ const round = (v: number, k: number) => Math.round(v * k) / k;
 /** The key that marks a content stream as conote's ink. */
 const INK_MARK = 'ConoteInk';
 
-function bounds(strokes: Stroke[], texts: TextBox[]) {
+function bounds(strokes: Stroke[], texts: TextBox[], shapes: Shape[]) {
 	let x0 = Infinity;
 	let y0 = Infinity;
 	let x1 = -Infinity;
 	let y1 = -Infinity;
+	for (const sh of shapes) {
+		const b = shapeBounds(sh);
+		x0 = Math.min(x0, b.x0);
+		y0 = Math.min(y0, b.y0);
+		x1 = Math.max(x1, b.x1);
+		y1 = Math.max(y1, b.y1);
+	}
 	for (const t of texts) {
 		const b = textBounds(t);
 		x0 = Math.min(x0, b.x);
@@ -191,11 +225,13 @@ function drawInk(
 	page: PDFPage,
 	strokes: Stroke[],
 	texts: TextBox[],
+	shapes: Shape[],
 	font: PDFFont | null,
 	m: Mat,
 	layer: PDFRef
 ) {
-	if (strokes.length === 0 && texts.length === 0) return;
+	shapes = shapes.filter((s) => !s.open);
+	if (strokes.length === 0 && texts.length === 0 && shapes.length === 0) return;
 	const {
 		pushGraphicsState,
 		popGraphicsState,
@@ -307,6 +343,41 @@ function drawInk(
 		ops.push(popGraphicsState());
 	}
 	strokes.filter((s) => !isMarker(s)).forEach(draw);
+
+	// Shapes over the ink, as on screen: covers (opaque) first, then outlines.
+	const drawShape = (s: Shape) => {
+		const [r, g, b] = hexToRgb(s.color);
+		const box = shapeBox(s);
+		if (s.kind === 'cover') {
+			ops.push(
+				setFillingRgbColor(r, g, b),
+				moveTo(box.x0, box.y0),
+				lineTo(box.x1, box.y0),
+				lineTo(box.x1, box.y1),
+				lineTo(box.x0, box.y1),
+				closePath(),
+				fill()
+			);
+			return;
+		}
+		ops.push(setStrokingRgbColor(r, g, b), setLineWidth(s.width));
+		if (s.kind === 'rect') {
+			ops.push(moveTo(box.x0, box.y0), lineTo(box.x1, box.y0), lineTo(box.x1, box.y1), lineTo(box.x0, box.y1), closePath(), stroke());
+		} else if (s.kind === 'ellipse') {
+			const e = ellipseCurves(box);
+			ops.push(moveTo(e.start.x, e.start.y));
+			for (const c of e.segs) ops.push(appendBezierCurve(c[0], c[1], c[2], c[3], c[4], c[5]));
+			ops.push(closePath(), stroke());
+		} else {
+			ops.push(moveTo(s.x0, s.y0), lineTo(s.x1, s.y1), stroke());
+			if (s.kind === 'arrow') {
+				const [a, b2] = arrowHead(s);
+				ops.push(moveTo(a.x, a.y), lineTo(s.x1, s.y1), lineTo(b2.x, b2.y), stroke());
+			}
+		}
+	};
+	shapes.filter((s) => s.kind === 'cover').forEach(drawShape);
+	shapes.filter((s) => s.kind !== 'cover').forEach(drawShape);
 
 	// Text on top. The transform above flips y (page-local runs down), so each
 	// line's text matrix flips it back.

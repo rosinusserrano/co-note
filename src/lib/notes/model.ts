@@ -59,6 +59,32 @@ export interface TextBox {
 	page?: string;
 }
 
+export type ShapeKind = 'rect' | 'ellipse' | 'line' | 'arrow' | 'cover';
+
+/**
+ * A drawn shape, from (x0, y0) to (x1, y1): a box's corners (rect, ellipse,
+ * cover) or a line's ends (line, arrow) — world coordinates, or page-local
+ * when `page` is set, like a Stroke's points. Immutable like strokes: a
+ * change is a replacement (see noteStore.setShape).
+ *
+ * A `cover` is an opaque box for hiding part of a page until the right
+ * moment: a tap lifts it (`open`) for everyone, another puts it back.
+ */
+export interface Shape {
+	id: string;
+	kind: ShapeKind;
+	x0: number;
+	y0: number;
+	x1: number;
+	y1: number;
+	color: string;
+	/** Line width in world units (a cover has no outline). */
+	width: number;
+	page?: string;
+	/** A cover that's been lifted: not drawn, nor exported. */
+	open?: boolean;
+}
+
 /**
  * One page of the note, in export order. Sizes are PDF points (1 pt = 1 world
  * unit at 100% zoom).

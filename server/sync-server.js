@@ -444,6 +444,7 @@ const routes = {
 	'/api/account/notes': ['account', signedIn((account) => registry.accountNotes(account))],
 	'/api/account/add': ['account', signedIn((account, body) => registry.addToAccount(account, body))],
 	'/api/account/forget': ['account', signedIn((account, body) => registry.forget(account, body))],
+	'/api/account/folder': ['account', signedIn((account, body) => registry.setFolder(account, body))],
 	'/api/account/vault': ['account', signedIn((account) => registry.getVault(account))],
 	'/api/account/vault/set': ['account', signedIn((account, body) => registry.setVault(account, body))],
 	'/api/account/claim': ['owner', signedIn((account, body) => registry.claim(account, body))],

@@ -85,7 +85,7 @@ class Account {
 		try {
 			const mine = noteIndex.notes.filter((n) => !n.via && n.token);
 			for (let i = 0; i < mine.length; i += 50) {
-				const batch = mine.slice(i, i + 50).map((n) => ({ id: n.id, token: n.token, ownerKey: n.ownerKey }));
+				const batch = mine.slice(i, i + 50).map((n) => ({ id: n.id, token: n.token, ownerKey: n.ownerKey, folder: n.folder }));
 				await addToAccount(batch);
 			}
 			const { notes } = await accountNotes();

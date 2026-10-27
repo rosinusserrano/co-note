@@ -31,6 +31,9 @@ export interface NoteEntry {
 	private?: boolean;
 	/** The account this entry came from or was saved to: signing out forgets it. */
 	via?: string;
+	/** The folder it's filed in on the start page ('' or absent: none). Kept
+	 *  in the account for its notes, else only on this device. */
+	folder?: string;
 	openedAt: number;
 }
 
@@ -80,6 +83,7 @@ class NoteIndex {
 			saved: session.saved ?? prev?.saved,
 			private: session.private ?? prev?.private,
 			via: opts.via ?? prev?.via,
+			folder: session.folder ?? prev?.folder,
 			openedAt: opts.openedAt ?? Date.now()
 		};
 		this.notes = [...this.notes.filter((n) => n.id !== entry.id), entry];
@@ -92,6 +96,20 @@ class NoteIndex {
 		if (!this.get(id) || this.get(id)!.name === name) return;
 		this.notes = this.notes.map((n) => (n.id === id ? { ...n, name } : n));
 		this.#persist();
+	}
+
+	/** File a note into a folder ('' = none). This device only; for a note in
+	 *  the account the caller tells the server too. */
+	setFolder(id: string, folder: string) {
+		this.notes = this.notes.map((n) => (n.id === id ? { ...n, folder: folder || undefined } : n));
+		this.#persist();
+	}
+
+	/** Every folder in use, sorted. */
+	get folders(): string[] {
+		return [...new Set(this.notes.map((n) => n.folder).filter((f): f is string => !!f))].sort((a, b) =>
+			a.localeCompare(b, undefined, { sensitivity: 'base' })
+		);
 	}
 
 	touch(id: string) {

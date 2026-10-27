@@ -1,13 +1,14 @@
-// The lasso's geometry and clipboard: picking strokes and text boxes inside a
-// loop, moving them, and copying them between places (and notes).
+// The lasso's geometry and clipboard: picking strokes, text boxes and shapes
+// inside a loop, moving them, and copying them between places (and notes).
 //
 // Selected items are handled in world coordinates; putting them down again
 // (`place`) gives them new ids and re-homes each onto the page under its
 // start, page-local, the same way a fresh stroke or text box is.
 
-import { uid, type Stroke, type TextBox } from './model';
+import { uid, type Shape, type Stroke, type TextBox } from './model';
 import { pageAt, type PlacedPage } from './pages';
 import { textBounds } from './text';
+import { shapeBounds, shapeMiddle } from './shapes';
 import type { Box } from './viewport.svelte';
 
 type Point = { x: number; y: number };
@@ -16,6 +17,7 @@ type Point = { x: number; y: number };
 export interface Items {
 	strokes: Stroke[];
 	texts: TextBox[];
+	shapes: Shape[];
 }
 
 /** An item's world copy, or null if it sits on a deleted page (not shown). */
@@ -35,6 +37,14 @@ function worldText(t: TextBox, pages: Map<string, PlacedPage>): TextBox | null {
 	return { ...rest, x: t.x + p.x, y: t.y + p.y };
 }
 
+function worldShape(s: Shape, pages: Map<string, PlacedPage>): Shape | null {
+	if (!s.page) return s;
+	const p = pages.get(s.page);
+	if (!p) return null;
+	const { page: _, ...rest } = s;
+	return { ...rest, x0: s.x0 + p.x, y0: s.y0 + p.y, x1: s.x1 + p.x, y1: s.y1 + p.y };
+}
+
 /** Is (x, y) inside the polygon (even-odd)? */
 function inside(poly: Point[], x: number, y: number) {
 	let hit = false;
@@ -47,10 +57,10 @@ function inside(poly: Point[], x: number, y: number) {
 }
 
 /** The items a lasso loop (world points) takes: strokes with most of their
- *  points inside it, text boxes whose middle is. */
-export function lassoed(loop: Point[], strokes: Stroke[], texts: TextBox[], pages: PlacedPage[]): Items {
+ *  points inside it, text boxes and shapes whose middle is. */
+export function lassoed(loop: Point[], strokes: Stroke[], texts: TextBox[], shapes: Shape[], pages: PlacedPage[]): Items {
 	const byId = new Map(pages.map((p) => [p.id, p]));
-	const out: Items = { strokes: [], texts: [] };
+	const out: Items = { strokes: [], texts: [], shapes: [] };
 	if (loop.length < 3) return out;
 	for (const s of strokes) {
 		const w = worldStroke(s, byId);
@@ -64,13 +74,18 @@ export function lassoed(loop: Point[], strokes: Stroke[], texts: TextBox[], page
 		const b = textBounds(w);
 		if (inside(loop, b.x + b.w / 2, b.y + b.h / 2)) out.texts.push(w);
 	}
+	for (const s of shapes) {
+		const w = worldShape(s, byId);
+		const m = w && shapeMiddle(w);
+		if (w && m && inside(loop, m.x, m.y)) out.shapes.push(w);
+	}
 	return out;
 }
 
 /** The world copies of the items with these ids (those still visible). */
-export function itemsById(ids: Set<string>, strokes: Stroke[], texts: TextBox[], pages: PlacedPage[]): Items {
+export function itemsById(ids: Set<string>, strokes: Stroke[], texts: TextBox[], shapes: Shape[], pages: PlacedPage[]): Items {
 	const byId = new Map(pages.map((p) => [p.id, p]));
-	const out: Items = { strokes: [], texts: [] };
+	const out: Items = { strokes: [], texts: [], shapes: [] };
 	for (const s of strokes) {
 		const w = ids.has(s.id) ? worldStroke(s, byId) : null;
 		if (w) out.strokes.push(w);
@@ -78,6 +93,10 @@ export function itemsById(ids: Set<string>, strokes: Stroke[], texts: TextBox[],
 	for (const t of texts) {
 		const w = ids.has(t.id) ? worldText(t, byId) : null;
 		if (w) out.texts.push(w);
+	}
+	for (const s of shapes) {
+		const w = ids.has(s.id) ? worldShape(s, byId) : null;
+		if (w) out.shapes.push(w);
 	}
 	return out;
 }
@@ -104,10 +123,18 @@ export function itemsBounds(items: Items): Box | null {
 		x1 = Math.max(x1, b.x + b.w);
 		y1 = Math.max(y1, b.y + b.h);
 	}
+	for (const s of items.shapes) {
+		const b = shapeBounds(s);
+		x0 = Math.min(x0, b.x0);
+		y0 = Math.min(y0, b.y0);
+		x1 = Math.max(x1, b.x1);
+		y1 = Math.max(y1, b.y1);
+	}
 	return x0 <= x1 ? { x0, y0, x1, y1 } : null;
 }
 
-export const itemIds = (items: Items) => new Set([...items.strokes.map((s) => s.id), ...items.texts.map((t) => t.id)]);
+export const itemIds = (items: Items) =>
+	new Set([...items.strokes.map((s) => s.id), ...items.texts.map((t) => t.id), ...items.shapes.map((s) => s.id)]);
 
 /** World items shifted by (dx, dy), as new strokes / text boxes for the doc:
  *  fresh ids, each on the page under its start (page-local), else free. */
@@ -130,7 +157,14 @@ export function place(items: Items, dx: number, dy: number, pages: PlacedPage[])
 		const { page: _, ...rest } = t;
 		return { ...rest, id: uid(), x: t.x + dx - (p?.x ?? 0), y: t.y + dy - (p?.y ?? 0), ...(p ? { page: p.id } : {}) };
 	});
-	return { strokes, texts };
+	const shapes = items.shapes.map((s): Shape => {
+		const p = pageAt(pages, s.x0 + dx, s.y0 + dy);
+		const ox = dx - (p?.x ?? 0);
+		const oy = dy - (p?.y ?? 0);
+		const { page: _, ...rest } = s;
+		return { ...rest, id: uid(), x0: s.x0 + ox, y0: s.y0 + oy, x1: s.x1 + ox, y1: s.y1 + oy, ...(p ? { page: p.id } : {}) };
+	});
+	return { strokes, texts, shapes };
 }
 
 // --- Clipboard: per device, shared by its tabs (and notes) ---------------------
@@ -153,10 +187,11 @@ export function clipboard(): Items | null {
 		const raw = localStorage.getItem(CLIP_KEY);
 		if (raw) {
 			const v = JSON.parse(raw) as Items;
-			if (Array.isArray(v?.strokes) && Array.isArray(v?.texts)) clip = v;
+			// Copied before shapes existed: none.
+			if (Array.isArray(v?.strokes) && Array.isArray(v?.texts)) clip = { ...v, shapes: Array.isArray(v.shapes) ? v.shapes : [] };
 		}
 	} catch {
 		/* keep this tab's own */
 	}
-	return clip && clip.strokes.length + clip.texts.length > 0 ? clip : null;
+	return clip && clip.strokes.length + clip.texts.length + clip.shapes.length > 0 ? clip : null;
 }

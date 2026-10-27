@@ -58,8 +58,8 @@ export interface BrushPreset {
 }
 
 export const BRUSHES: Record<Brush, BrushPreset> = {
-	pen: { label: 'Pen', thinning: 0.6, smoothing: 0.5, streamline: 0.35, taper: 0, size: 3, min: 1, max: 16 },
-	brush: { label: 'Brush', thinning: 0.85, smoothing: 0.6, streamline: 0.45, taper: 10, size: 6, min: 2, max: 30 },
+	pen: { label: 'Pen', thinning: 0.6, smoothing: 0.5, streamline: 0.35, taper: 0, size: 3, min: 0.1, max: 16 },
+	brush: { label: 'Brush', thinning: 0.85, smoothing: 0.6, streamline: 0.45, taper: 10, size: 6, min: 0.2, max: 30 },
 	marker: { label: 'Marker', thinning: 0, smoothing: 0.6, streamline: 0.5, taper: 0, size: 18, min: 6, max: 60, marker: true }
 };
 

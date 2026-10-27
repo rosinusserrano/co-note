@@ -6,6 +6,7 @@
 		createNote,
 		joinNote,
 		forgetInAccount,
+		setNoteFolder,
 		normalizeName,
 		ApiError,
 		VIEW_ACCESS as ACCESS,
@@ -114,8 +115,9 @@
 	let me = $state(myName());
 	let createForm = $state({
 		name: '',
-		/** Signed in: no passcodes, only this account opens it. */
-		private: false,
+		/** Signed in: no passcodes, only this account opens it (the default:
+		 *  passcodes can be added later, to share it). */
+		private: true,
 		editPasscode: '',
 		viewAccess: 'passcode' as ViewAccess,
 		viewPasscode: '',
@@ -138,7 +140,7 @@
 			}
 			const session = await joinNote(joinForm.name, joinForm.passcode);
 			setMyName(me);
-			onopen(noteIndex.save(session, via()).id);
+			opened(noteIndex.save(session, via()));
 		} catch (err) {
 			joinForm.error = errorText(err);
 		} finally {
@@ -159,7 +161,7 @@
 					: { name, editPasscode, viewAccess, viewPasscode: viewAccess === 'passcode' ? viewPasscode : undefined }
 			);
 			setMyName(me);
-			onopen(noteIndex.save(session, via()).id);
+			opened(noteIndex.save(session, via()));
 		} catch (err) {
 			createForm.error = errorText(err);
 		} finally {
@@ -193,6 +195,61 @@
 
 	/** With notes on this device, they take the illustration's place. */
 	const returning = $derived(noteIndex.notes.length > 0);
+
+	// --- Folders: labels on notes, kept in the account for its notes -----------
+
+	const FOLDER_KEY = 'conote:folder';
+	/** The folder the list shows (null: everything), remembered on this device. */
+	let folderPick = $state<string | null>(
+		(() => {
+			try {
+				return localStorage.getItem(FOLDER_KEY);
+			} catch {
+				return null;
+			}
+		})()
+	);
+	/** A folder that emptied (its last note moved out) shows everything again. */
+	const folder = $derived(folderPick && noteIndex.folders.includes(folderPick) ? folderPick : null);
+	function showFolder(f: string | null) {
+		folderPick = f;
+		try {
+			if (f) localStorage.setItem(FOLDER_KEY, f);
+			else localStorage.removeItem(FOLDER_KEY);
+		} catch {
+			/* not remembered */
+		}
+	}
+	const listed = $derived(noteIndex.recent.filter((n) => !folder || n.folder === folder));
+	const unfiled = $derived(noteIndex.notes.filter((n) => !n.folder).length);
+
+	/** The note whose folder is being picked (its row opens a strip of folders). */
+	let filing = $state<string | null>(null);
+	let newFolder = $state('');
+
+	/** File a note into `to` ('' = no folder): here, and in the account if it's there. */
+	async function fileNote(n: NoteEntry, to: string) {
+		const clean = to.replace(/\s+/g, ' ').trim().slice(0, 40);
+		filing = null;
+		newFolder = '';
+		const before = n.folder ?? '';
+		if (clean === before) return;
+		noteIndex.setFolder(n.id, clean);
+		if (account.signedIn && n.via === account.name) {
+			try {
+				await setNoteFolder(n.id, clean);
+			} catch {
+				noteIndex.setFolder(n.id, before);
+				alert("Couldn't reach the server, so the folder didn't change. Try again when you're online.");
+			}
+		}
+	}
+
+	/** A note made or joined while a folder is shown goes into that folder. */
+	function opened(entry: NoteEntry) {
+		if (folder && !entry.folder) void fileNote(entry, folder);
+		onopen(entry.id);
+	}
 
 	const roleLabel = (n: NoteEntry) => (isOwner(n) ? 'Owner' : n.role === 'edit' ? 'Editor' : 'Observer');
 
@@ -240,12 +297,26 @@
 			{#if returning}
 				<section class="index">
 					<div class="indexhead">
-						<h2>My notes</h2>
-						<span class="kicker">{noteIndex.notes.length} on this device</span>
+						<h2>{folder ?? 'My notes'}</h2>
+						<span class="kicker">{folder ? `${listed.length} of ${noteIndex.notes.length}` : `${noteIndex.notes.length} on this device`}</span>
 					</div>
+					{#if noteIndex.folders.length > 0}
+						<div class="folders" role="tablist" aria-label="Folders">
+							<button role="tab" class="fchip" class:on={!folder} aria-selected={!folder} onclick={() => showFolder(null)}>
+								All <span class="kicker">{noteIndex.notes.length}</span>
+							</button>
+							{#each noteIndex.folders as f (f)}
+								<button role="tab" class="fchip" class:on={folder === f} aria-selected={folder === f} onclick={() => showFolder(f)}>
+									<Icon name="folder" size={15} />{f}
+									<span class="kicker">{noteIndex.notes.filter((n) => n.folder === f).length}</span>
+								</button>
+							{/each}
+							{#if unfiled && !folder}<span class="kicker loose">{unfiled} in no folder</span>{/if}
+						</div>
+					{/if}
 					<ol>
-						{#each noteIndex.recent as n, i (n.id)}
-							<li>
+						{#each listed as n, i (n.id)}
+							<li class:filing={filing === n.id}>
 								<button class="open" onclick={() => onopen(n.id)}>
 									<span class="no kicker">{String(i + 1).padStart(2, '0')}</span>
 									<span class="nm">{n.name}</span>
@@ -255,9 +326,41 @@
 									<span class="role kicker" data-role={isOwner(n) ? 'owner' : n.role}>{roleLabel(n)}</span>
 									<span class="when kicker">{ago(n.openedAt)}</span>
 								</button>
+								<button
+									class="forget"
+									class:on={filing === n.id}
+									aria-label={`Folder for ${n.name}`}
+									title={n.folder ? `In “${n.folder}” — move to another folder` : 'Put in a folder'}
+									onclick={() => {
+										filing = filing === n.id ? null : n.id;
+										newFolder = '';
+									}}
+								>
+									<Icon name={n.folder ? 'folder' : 'folderPlus'} size={16} />
+								</button>
 								<button class="forget" aria-label={`Forget ${n.name}`} title="Forget on this device" onclick={() => forget(n)}>
 									<Icon name="x" size={16} />
 								</button>
+								{#if filing === n.id}
+									<form
+										class="filebar"
+										transition:fly={{ y: -6, duration: 160 }}
+										onsubmit={(e) => {
+											e.preventDefault();
+											if (newFolder.trim()) void fileNote(n, newFolder);
+										}}
+									>
+										<span class="kicker">Folder</span>
+										{#each noteIndex.folders as f (f)}
+											<button type="button" class="fchip" class:on={n.folder === f} onclick={() => fileNote(n, f)}>{f}</button>
+										{/each}
+										{#if n.folder}
+											<button type="button" class="fchip" onclick={() => fileNote(n, '')}>No folder</button>
+										{/if}
+										<input class="input" bind:value={newFolder} maxlength="40" placeholder="New folder" aria-label="New folder name" />
+										<button class="btn" disabled={!newFolder.trim()}>Move</button>
+									</form>
+								{/if}
 							</li>
 						{/each}
 					</ol>
@@ -427,8 +530,8 @@
 						<div class="field" role="radiogroup" aria-label="Who can open it">
 							<span class="kicker">Who can open it</span>
 							<div class="seg">
-								<label><input type="radio" name="who" value={false} bind:group={createForm.private} />With a passcode</label>
 								<label><input type="radio" name="who" value={true} bind:group={createForm.private} />Only my account</label>
+								<label><input type="radio" name="who" value={false} bind:group={createForm.private} />With a passcode</label>
 							</div>
 							<small>
 								{createForm.private
@@ -846,6 +949,7 @@
 	}
 	li {
 		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
 		border-bottom: 1px solid var(--rule);
 	}
@@ -918,9 +1022,71 @@
 			background 0.15s,
 			color 0.15s;
 	}
-	.forget:hover {
+	.forget:hover,
+	.forget.on {
 		background: var(--ink);
 		color: var(--chalk);
+	}
+	.forget + .forget {
+		margin-left: 0;
+	}
+
+	/* Folders: chips over the list, and a strip under a note to file it. */
+	.folders {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.8rem 0 0.4rem;
+	}
+	.fchip {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		padding: 0.3rem 0.75rem;
+		border: 1px solid var(--rule);
+		border-radius: 999px;
+		background: var(--chalk);
+		color: var(--ink);
+		font: 500 0.85rem var(--f-sans);
+		cursor: pointer;
+	}
+	.fchip .kicker {
+		color: var(--smoke);
+	}
+	.fchip:hover {
+		border-color: var(--ink);
+	}
+	.fchip.on {
+		background: var(--ink);
+		border-color: var(--ink);
+		color: var(--chalk);
+	}
+	.fchip.on .kicker {
+		color: var(--lime);
+	}
+	.loose {
+		color: var(--smoke);
+		margin-left: 0.3rem;
+	}
+	.filebar {
+		flex-basis: 100%;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0 0.5rem 0.9rem;
+	}
+	.filebar > .kicker {
+		color: var(--graphite);
+		margin-right: 0.2rem;
+	}
+	.filebar .input {
+		width: 10rem;
+		padding-block: 0.35rem;
+	}
+	.filebar .btn {
+		padding-block: 0.35rem;
 	}
 
 	footer {

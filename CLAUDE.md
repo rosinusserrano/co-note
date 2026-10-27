@@ -28,8 +28,12 @@ boxes**, **saved inks** (brush + colour + size, one tap away), a **lasso**
 (move, copy, cut, paste, delete), optional **dots on pages**, in PDFs a
 **preview of where a link leads** (a citation's reference entry) on hover,
 a **page picker** for long PDFs (a chapter from the outline, or a range),
-**renaming** notes, and **private notes** (no passcode: only the owner's
-account opens them).
+**renaming** notes, **private notes** (no passcode: only the owner's
+account opens them — the default when signed in), **folders** for the
+start page's list (kept in the account), **dropping a PDF** onto a note,
+**shapes** (rectangle, ellipse, line, arrow, and **covers** that a tap lifts
+for everyone), and **presenting** (pages one at a time, full screen, the
+owner's slides bringing everyone along).
 The UI is a
 "paper & ink" design (see *Design & chrome*): a full-bleed canvas with floating
 toolbars that step back while the pen is down, and a **focus mode** for devices
@@ -206,6 +210,23 @@ chosen device.
   in the first + last 15% of the time, 60% in the middle 30%; ends exactly
   on the owner's view; a target inside the view only zooms in.
   Accounts and the earlier suites re-run green.
+  Shapes & presenting round (40 + 13 checks, plus lasso, text, textrt,
+  roundtrip, phone, bars, presets, regress re-run green): signed in, New
+  note defaults to *Only my account* (no passcode fields); a note filed
+  into a folder shows a chip, the account keeps it, a note made while a
+  folder shows goes into it, another device signing in has the folders,
+  *No folder* takes it out; the hand tool's wheel scrolls (Ctrl+wheel
+  zooms); a PDF dragged over the note shows the drop hint and dropping it
+  imports; a text tap held and dragged places the box where it's dropped,
+  the editor's grip moves it while the typing goes on; R picks shapes, the
+  panel offers five kinds; a cover hides the page, a tap lifts it and puts
+  it back, undo lifts it again; Shift holds an arrow straight; the eraser
+  and the lasso take shapes; F5 presents (bars gone, dark desk, 1/n, → and
+  Page Up turn pages, Esc ends); the owner's slides bring another device
+  along (and stop when *Everyone follows* is off); a pen tap on a cover
+  while presenting lifts it with no dot left and no live preview reaching
+  the other device; the pen draws while presenting; an exported PDF
+  reopens with its shapes (a lifted cover still lifted) and ink.
 - **Not yet verified on real hardware:** on-device stylus feel and the Android
   install path over HTTPS.
 - **Next:** see `ROADMAP.md`. Direct links run *alongside* the relay; the relay
@@ -346,8 +367,9 @@ must be preserved:
   below). Public API the UI depends on: `connect(id, { token, label })`/`disconnect()`,
   `renewToken(token)`, `access` (`'ok' | 'revoked' | 'gone'`),
   `strokes` (plain cached array — read together with the reactive `revision`
-  counter), `strokeCount`, `texts`/`textCount`, `addStroke`, `setText`, `removeStrokes(ids)` (strokes and texts),
-  `replaceItems(remove, strokes, texts)` (one undo step: lasso move / cut / paste), `beginChange`,
+  counter), `strokeCount`, `texts`/`textCount`, `shapes`/`shapeCount`, `addStroke`, `setText`,
+  `addShape`, `setShape(oldId, shape)` (a cover lifted / put back), `removeStrokes(ids)` (strokes, texts and shapes),
+  `replaceItems(remove, strokes, texts, shapes)` (one undo step: lasso move / cut / paste), `beginChange`,
   `clear`, `undo`/`redo`, `canUndo`/`canRedo`, `status`/`peers`/`direct`/`hub`
   for the sync indicator, `presence` (others) / `setPresence()` (us), and
   `pullEveryone()` / `pulled` (the owner's pulls).
@@ -367,6 +389,9 @@ must be preserved:
 - `src/lib/notes/vault.ts` — sealing the account's vault (PBKDF2 → AES-GCM).
 - `src/lib/notes/selection.ts` — the lasso: what a loop takes, moving /
   placing items (re-homed onto pages), the per-device clipboard.
+- `src/lib/notes/shapes.ts` — shape geometry (box, bounds, hit test, arrow
+  head, ellipse curves, Shift-constrain), shared by canvas, eraser, lasso,
+  Fit and export.
 - `src/lib/components/ZoteroConnect.svelte` — the Zotero key / storage form
   (note panel and the start page's Account tab).
 - `src/lib/components/DrawingCanvas.svelte` — the canvas + all input. See below.
@@ -376,7 +401,7 @@ must be preserved:
 - `src/routes/+page.svelte` — router only: `?note=<id>` → `NoteView`, else `Home`
   (`?join=<name>` prefills the join form; that's the share link).
 - `src/lib/components/Home.svelte` — start screen: Join, Create, My notes (in
-  place of the illustration once this device has notes).
+  place of the illustration once this device has notes), its folders.
 - `src/lib/components/NoteView.svelte` — floating chrome + canvas for one note;
   owns the session `Viewport`, tools/inks, draw/observe mode, follow and focus
   mode, keyboard shortcuts, the panels (people, share, more, ink) and notices.
@@ -415,7 +440,8 @@ must be preserved:
 - `passcodeError` refuses common passcodes, runs/repeats (`1234`, `aaaa`, `dcba`)
   and the note's own name. Minimum length is still 4.
 - **Private notes** (`note.edit === null`, `session.private`): created
-  signed in with *Only my account*, no passcodes (observers `none`). Only
+  signed in with *Only my account* (the form's default when signed in),
+  no passcodes (observers `none`). Only
   the account the note belongs to opens it — from its list, or by name with
   an empty passcode. The owner can give it an editor passcode later
   (settings), or make an account-owned note private again (`private: true`
@@ -478,6 +504,15 @@ must be preserved:
   drops entries from this account that it no longer lists (deleted, or
   forgotten on another device) — except unsaved ones that ended, whose last
   copy is only here, and the note that's open.
+- **Folders** are labels on the account's notes (`grant.folder`,
+  `/api/account/folder`, returned by `/api/account/notes`; `grant()` keeps
+  it when a grant is renewed), so every device of the account files a note
+  the same way. Without an account, or for notes not in it, the folder is
+  only this device's (`NoteEntry.folder`); signing in pushes it along with
+  the note (`/api/account/add`, unless the account already filed it). No
+  folder exists empty. Home shows chips over the list (the picked one
+  remembered per device, `conote:folder`) and a strip under a note to file
+  it; a note made or joined while a folder shows goes into it.
 - **Signing out forgets the account's notes on the device** (entries with
   `via` = that account, and their local data): a borrowed laptop keeps
   nothing. Entries joined signed out stay.
@@ -603,9 +638,9 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   IndexedDB (`conote-files`, key `<id>/<hash>`; dropped by `destroyNoteData`),
   so PDFs open offline. `importPdf` validates with pdf.js *before* uploading.
 - **Exported PDFs reopen editable** (`conoteData.ts`). The export embeds
-  `conote.json` (page `extra` flags, layout, every on-page stroke page-local
-  with its PDF page index; a page-less note's free ink moved onto its fitted
-  page) and draws the ink as one content stream per page marked
+  `conote.json` (page `extra` flags, layout, every on-page stroke, text box
+  and shape page-local with its PDF page index, a lifted cover still lifted;
+  a page-less note's free ink moved onto its fitted page) and draws the ink as one content stream per page marked
   `/ConoteInk true`, inside an optional-content layer *conote ink*. Importing
   such a PDF (`readPdfPages` → `readConoteData`, which validates everything —
   it's a file) adds its pages with their `extra` flags and the strokes as
@@ -614,6 +649,8 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   from copied pages before drawing the ink again — so ink is never drawn
   twice, however many round trips. Other viewers show the layer as normal.
   Keep the marker key and layer name stable: old exports depend on them.
+- **Dropping a PDF** file anywhere on the note (editors) imports it like
+  ⋯ → Import PDF; a dashed hint shows while a file is dragged over.
 - **Long PDFs** (≥ `PICK_PAGES_FROM`, 31 pages) ask which pages to take
   (`importPdf(file, choose)` → `PagePicker`): the outline's first two levels
   as chapters (`readChapters`: each up to the next bookmark at its level or
@@ -741,8 +778,9 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   laser always gives way to the pinch. Pen/mouse
   **pan** instead with the hand tool, Space held, the middle button, or in
   observe mode. Wheel **scrolls** (Shift: sideways; line/page `deltaMode`s
-  scaled), Ctrl+wheel (= trackpad pinch) **zooms** at the cursor, and so
-  does the plain wheel with the hand tool (Shift+wheel still scrolls). The wheel
+  scaled), Ctrl+wheel (= trackpad pinch) **zooms** at the cursor — whatever
+  the tool (the hand tool zooming on the plain wheel was tried and reverted
+  at the user's request). The wheel
   listener is bound by hand with `passive: false`: its `preventDefault()` is
   what stops Ctrl+wheel zooming the browser page. `touch-action: none` — we own
   all gestures.
@@ -838,14 +876,15 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   `ca/CA = MARKER_ALPHA`.
 - Each brush (and text) keeps its own colour and size in `NoteView` (`inks`,
   ranges in `INKS`); the palette and slider edit the current one, and the
-  slider's range comes from the preset. **Saved inks** (`presets`, localStorage
+  slider's range comes from the preset (logarithmic, so the pen's 0.1 pt —
+  for drawing zoomed far in — gets as much travel as its thick end). **Saved inks** (`presets`, localStorage
   `conote:presets`, at most 6, validated on read): brush + colour + size,
   saved and forgotten in the ink panel, shown on the rail (wide screens only;
   phones use the panel) as the brush's icon in that colour, sized by where
   the size sits in the brush's range.
 - **`mode = 'observe'`** disables inking but still allows pan/zoom — this is the
   README's "observer" session.
-- **Tools:** `tool = 'pen' | 'brush' | 'marker' | 'text' | 'eraser' | 'lasso' | 'laser' | 'hand'`
+- **Tools:** `tool = 'pen' | 'brush' | 'marker' | 'text' | 'shape' | 'eraser' | 'lasso' | 'laser' | 'hand'`
   (the laser: see Presence). The eraser is stroke-level (removes whole
   strokes it touches, via `strokeHit` distance testing, and text boxes whose
   bounds it touches) with a **screen-constant**
@@ -869,6 +908,26 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   Deliberate: text boxes are for quick remarks, not symbols, so no embedded
   font (decided with the user).
   No live preview to others while typing; it appears when stored.
+  **Moving it while typing:** a text tap held and dragged takes the box
+  along before it's let go (`textDrag`), and the open editor has a grip
+  (`.textgrip`, its pointerdown `preventDefault`ed so the editor keeps the
+  focus) to drag it anywhere; on release it's re-homed onto the page under
+  its corner. A blur during the drag doesn't store it.
+- **Shapes** (`Shape` in `model.ts`, their own `Y.Array` `shapes` — same
+  reason as texts; tracked by the UndoManager; `shapes.ts`; key R): rect,
+  ellipse, line, arrow and **cover**, picked in the ink panel (per device,
+  `conote:shape`), with the shape ink's colour and line width. Drag out
+  from corner / end to corner / end, Shift for square, circle or 45°;
+  page-local on the page it starts on, clipped to it. Drawn into `base`
+  after the ink and before text — covers first, opaque, so a cover hides
+  the PDF *and* the ink under it, while text stays on top (labels).
+  Immutable: changes are replacements. **A cover is for hiding part of a
+  page during a talk:** a tap on it (shape or hand tool, or any tool while
+  presenting) flips `open` for everyone via `setShape` — one undo step. A
+  lifted cover isn't drawn or exported; editors see a dashed outline where
+  it would go back (`openCovers`, off while presenting). The eraser takes
+  shapes along their line (covers anywhere inside), the lasso by their
+  middle; export draws them as vector paths in the ink stream.
 - **Lasso** (`selection.ts`; key S): a loop takes the strokes with at
   least half their points inside and the text boxes whose middle is.
   `selection` keeps their ids and world copies; a frame shows it, with
@@ -895,7 +954,6 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   them), down ~4.6 lines or to the next entry back at the left edge (hanging
   indent / label column styles). Shown at the page's zoom (100–200%), within
   640 px; gone on moving off, any pointerdown, or a view change.
-- **Hand tool + wheel** zooms (see the wheel note above).
 
 ## Design & chrome (`app.css`, `NoteView.svelte`, `Home.svelte`)
 
@@ -949,9 +1007,22 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   `DrawingCanvas.follow`, which eases toward it, and falls back if the device
   leaves. Any hand pan/zoom sets
   `follow = null`, as before.
-- **Keyboard** (not while typing): P B M T E S L H tools, Ctrl+Z / Ctrl+Shift+Z
-  (or Ctrl+Y), Ctrl+C / X / V and Delete for the lasso, F focus, 1 fit, 0 100%, +/− zoom, Esc closes a panel / leaves
-  focus. Space-to-pan stays in `DrawingCanvas`.
+- **Presenting** (`presenting`, F5 or the button beside focus — wide
+  screens with pages only; ⋯ → Present everywhere; Esc ends): the pages in
+  export order are the slides. Chrome gone, fullscreen if allowed, a dark
+  desk (`desk='dark'`) without page labels, and the view held on the slide
+  through `DrawingCanvas.follow` (a hand pan/zoom lets go until the next
+  slide or *Fit*). ← → ↑ ↓, Page Up / Down (clickers) and Home / End turn
+  pages. Editors keep drawing (a bottom bar like focus mode's: page
+  arrows, pen / marker / eraser / laser / hand, undo); a pen tap on a
+  cover lifts it instead of leaving a dot (`coverTaps`; its live preview is
+  held back like a young finger stroke, so nobody sees a dot flash). For
+  the owner, *Everyone follows* (on by default) sends a pull with each
+  slide (`pullEveryone(page rect)`), so watching devices turn pages too.
+  Blocks app updates while on.
+- **Keyboard** (not while typing): P B M T R E S L H tools, Ctrl+Z / Ctrl+Shift+Z
+  (or Ctrl+Y), Ctrl+C / X / V and Delete for the lasso, F focus, F5 present, 1 fit, 0 100%, +/− zoom, Esc closes a panel / leaves
+  focus / ends presenting. Space-to-pan stays in `DrawingCanvas`.
 
 ## Not built yet
 
