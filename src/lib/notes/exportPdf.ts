@@ -87,6 +87,7 @@ export async function exportPdf(
 			...(s.brush ? { brush: s.brush } : {}),
 			...(s.sim ? { sim: true } : {}),
 			...(s.z ? { z: s.z } : {}),
+			...(s.sense !== undefined ? { sense: s.sense } : {}),
 			page,
 			points: s.points.map((p) => ({ x: round(p.x + dx, 100), y: round(p.y + dy, 100), pressure: round(p.pressure, 1000) }))
 		});

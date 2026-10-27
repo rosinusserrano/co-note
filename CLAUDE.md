@@ -227,6 +227,18 @@ chosen device.
   while presenting lifts it with no dot left and no live preview reaching
   the other device; the pen draws while presenting; an exported PDF
   reopens with its shapes (a lifted cover still lifted) and ink.
+  Pen-feel round (18 + 7 checks, pen over CDP; the earlier suites re-run
+  green): the ink layer covers the canvas, same size, lets pointers
+  through; mid-stroke the ink is on the layer (reaching the pen's tip) and
+  the main canvas untouched, another device sees it live; right after
+  pen-up it's on screen, then on the main canvas only with the layer
+  empty; a pen stroke carries `sense` 0.55, also on the other device; a
+  2%-pressure line is ~59% of the set width (42% before); a marker in
+  progress is drawn on the page, not the layer; the ⋯ menu's readout
+  shows the stroke; a mouse stroke draws without `sense`; *Fast ink* off
+  removes the layer (the stroke in progress on the main canvas), survives
+  a reload, on brings it back. Thinnest pen 0.1 pt, stored as such, a ~2
+  px hairline at 2000%; the log slider's ends and middle.
 - **Not yet verified on real hardware:** on-device stylus feel and the Android
   install path over HTTPS.
 - **Next:** see `ROADMAP.md`. Direct links run *alongside* the relay; the relay
@@ -308,6 +320,18 @@ kept; restore steps in `deploy/backup.sh`). The old open matchmaking service
   `_app/immutable/` bundles for 30 days (see PWA under Stack).
 - `sudo bash deploy/update-server.sh` — after changes in `server/` or the
   units / `backup.sh` in `deploy/`.
+
+**Dev copy — https://conote-dev.sniggles.de** (`deploy/dev/`): for trying a
+branch on real devices first. Its own note server (`conote-dev-sync`, port
+5184, data in `/var/lib/conote-dev`, no backups — no production notes or
+accounts) and web root `/srv/conote-dev-web`; installs as the app "conote
+dev" (`CONOTE_APP_NAME`). Deploys whatever checkout (or worktree) the script
+is run from.
+
+- `sudo bash deploy/dev/setup-dev.sh` — first time, and after server
+  changes: Caddy block (like `setup-server.sh`), server bundle + unit, then
+  the web part.
+- `bash deploy/dev/publish-dev.sh` — after client changes (no sudo).
 
 ### Android APK (`android/`, `.github/workflows/build.yml`)
 
@@ -799,9 +823,29 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   the canvas (they can cancel the pointer).
 - **Predicted points**: the live stroke is drawn with up to `MAX_PREDICTED`
   points from `getPredictedEvents()` on its tip (hides a frame or two of
-  latency). They're never stored or sent, and replaced on every move. No
-  `desynchronized` context: each frame re-composites from the paper up, and
-  front-buffer rendering would show those half-drawn frames.
+  latency). They're never stored or sent, and replaced on every move.
+- **Our own stroke in progress has a layer of its own** (`inkLayer`, *Fast
+  ink* in the ⋯ menu, per device `conote:fastInk`, default on): a canvas
+  over **everything** on the page (z-index 1000, `pointer-events: none`)
+  with a `desynchronized` (low-latency) context — the browser may then show
+  it without going through the compositor, which it only does for a
+  transparent canvas with nothing above it. **Not on Android**
+  (`LOW_LATENCY_OK`): Chrome there shows a desynchronized canvas unblended,
+  and the transparent layer turned the whole screen black at the first
+  touch; the layer stays, without the hint. Each frame the stroke is drawn
+  into an offscreen `liveBuf` and the changed rectangle copied across in
+  one `copy` drawImage: clearing the layer itself could be seen mid-draw.
+  While only the live stroke changes, the main canvas isn't recomposited
+  at all (`liveDirty` instead of `markDirty`). On pen-up the stroke
+  **lingers** on the layer `LINGER_MS` — the main canvas goes through the
+  compositor and shows it a frame or two later — so it never blinks.
+  Markers stay on the main canvas (they multiply into the page). Off, or
+  without the layer, the old path draws it with everything else.
+- **Pen readout** (⋯ menu, after a pen or finger stroke; `PenStats` via
+  `onpenstats`): samples/s, time and distance to the first moved sample,
+  raw pressure at down / max / last, frame times, input-event → frame, and
+  whether the browser took the low-latency hint. For telling a slow device
+  from a slow pen on real hardware.
 - **Following eases** (`follow(box)`, exported): the render loop moves the
   view a fraction toward the framing of the target box every frame (time
   constant `TRACK_TAU_MS`), so a stream of updates — a growing drawing,
@@ -838,7 +882,8 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   flags, not per-point reactivity. Committed strokes are drawn into an offscreen
   `base` canvas only when `baseDirty` (revision / viewport / resize); each frame
   composites paper (warm `PAPER`) → dot grid → pages (white sheet + PDF
-  bitmap) → `base` → live stroke → presence → eraser ring, so drawing on a big
+  bitmap) → `base` → presence → eraser ring (our live stroke: on the ink
+  layer above, see Fast ink), so drawing on a big
   note doesn't redraw the whole note per sample. The **dot grid** is one
   pattern fill (`drawGrid`): a 64 px tile scaled to the spacing, in world space;
   the spacing halves/doubles with the zoom (screen spacing within 2–4 ×
@@ -865,6 +910,16 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   World-unit thresholds had eaten the small details you zoom in to draw.
   Brush strokes without `z` take the exact old path. Like presets, these
   constants restyle every stroke that has `z`.
+  **Pressure sense** (`Stroke.sense`, `PEN_SENSE` = 0.55, stamped on pen
+  strokes, carried in `LiveChunk` and conote.json): pressure is pulled
+  toward the middle before it shapes the width (`0.5 + (p − 0.5) × sense`),
+  because pens report next to nothing in the first and last moments of
+  contact and a stroke's start and end came out too faint (at the pen's
+  thinning, zero pressure gave 40% of the width; now 67%). Strokes without
+  it keep the full swing. The live outline's **last point is the sample
+  itself** (`getStrokePoints` with `last: true` always — a finished stroke
+  is the same either way), so the tip stays on the pen instead of trailing
+  it through the streamline.
   Strokes without `brush` (drawn before brushes) keep the old look: a stroked
   centre line, smoothed through sample midpoints, cut into runs of quantised
   pressure width. Stored points are the raw samples (minus ones < 0.75 screen

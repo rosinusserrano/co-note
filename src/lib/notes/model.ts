@@ -34,6 +34,12 @@ export interface Stroke {
 	 */
 	z?: number;
 	/**
+	 * How much pen pressure moves the width away from the middle (0..1; see
+	 * ink.ts). Stamped on pen strokes so a light touch at the start and end
+	 * still shows. Absent on older strokes, which keep the full swing.
+	 */
+	sense?: number;
+	/**
 	 * The page this ink was drawn on (a PageEntry id). Its points are then
 	 * *page-local*: PDF points from the page's top-left corner, y down. That
 	 * way ink moves with its page when the layout changes, and export can put

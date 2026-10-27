@@ -16,8 +16,9 @@ export default defineConfig({
 			registerType: 'autoUpdate',
 			injectRegister: false,
 			manifest: {
-				name: 'conote',
-				short_name: 'conote',
+				// The dev site (deploy/dev) installs as its own app beside the real one.
+				name: process.env.CONOTE_APP_NAME ?? 'conote',
+				short_name: process.env.CONOTE_APP_NAME ?? 'conote',
 				description: 'Pen-drawing notes with independent per-session zoom and scroll.',
 				theme_color: '#f4f0e7',
 				background_color: '#f4f0e7',

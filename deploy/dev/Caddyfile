@@ -1,0 +1,27 @@
+# co-note dev at conote-dev.sniggles.de: a test copy with its own note server
+# (port 5184) and data, for trying a branch on real devices before it goes to
+# conote.sniggles.de. deploy/dev/setup-dev.sh puts this block (from this
+# comment to the closing brace) into /etc/caddy/Caddyfile.
+conote-dev.sniggles.de {
+	encode zstd gzip
+	header X-Robots-Tag "noindex, nofollow"
+
+	handle_path /sync/* {
+		reverse_proxy localhost:5184
+	}
+
+	handle /api/* {
+		reverse_proxy localhost:5184
+	}
+
+	handle {
+		root * /srv/conote-dev-web
+		@immutable path /_app/immutable/*
+		header @immutable Cache-Control "public, max-age=31536000, immutable"
+		header @immutable -Last-Modified
+		@mutable not path /_app/immutable/*
+		header @mutable Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}

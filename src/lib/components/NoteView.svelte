@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
 	import { fly, scale } from 'svelte/transition';
-	import DrawingCanvas from './DrawingCanvas.svelte';
+	import DrawingCanvas, { type PenStats } from './DrawingCanvas.svelte';
 	import NoteSettings from './NoteSettings.svelte';
 	import PagePicker from './PagePicker.svelte';
 	import Icon, { type IconName } from './Icon.svelte';
@@ -246,6 +246,27 @@
 		}
 	}
 
+	/** The stroke in progress on a low-latency layer of its own (see
+	 *  DrawingCanvas). On unless switched off on this device: some screens
+	 *  may not take to it, and it's the way to compare. */
+	const FAST_INK_KEY = 'conote:fastInk';
+	let fastInk = $state(readFastInk());
+	function readFastInk() {
+		try {
+			return localStorage.getItem(FAST_INK_KEY) !== '0';
+		} catch {
+			return true;
+		}
+	}
+	function toggleFastInk() {
+		fastInk = !fastInk;
+		try {
+			localStorage.setItem(FAST_INK_KEY, fastInk ? '1' : '0');
+		} catch {
+			/* not remembered, still applies for this session */
+		}
+	}
+
 	/** The dot grid on pages too, to line geometry up with. Per device, remembered. */
 	const PAGE_DOTS_KEY = 'conote:pageDots';
 	let pageDots = $state(
@@ -333,6 +354,9 @@
 	);
 	/** What the pen last sent on touching down (shown under the setting). */
 	let penTouch = $state('');
+	/** How the last stroke's input went (the ⋯ menu's pen readout). */
+	let penStats = $state<PenStats | null>(null);
+	const p2 = (v: number) => v.toFixed(2);
 	function setPenButton(b: PenButton) {
 		penButton = b;
 		writeLocal(PEN_BUTTON_KEY, b);
@@ -1312,6 +1336,8 @@
 			onpen={onPen}
 			penButton={penButtonUse}
 			onpentouch={(info) => (penTouch = info)}
+			onpenstats={(st) => (penStats = st)}
+			{fastInk}
 		/>
 	</main>
 
@@ -1922,6 +1948,20 @@
 						<p class="fine kicker pentouch" title="What the pen sent the last time it touched down: button 2 / buttons 2 or 3 is the side button, 5 / 32 the eraser end">
 							Last pen touch: {penTouch}
 						</p>
+					{/if}
+					<button class="item" onclick={toggleFastInk} title="Fast ink: the line you're drawing goes on a layer the browser can show sooner. Switch off to compare, or if ink looks wrong while drawing">
+						<Icon name="zap" size={18} /><span>Fast ink</span><span class="kicker" class:lit={fastInk}>{fastInk ? 'on' : 'off'}</span>
+					</button>
+					{#if penStats}
+						{@const st = penStats}
+						<dl class="fine kicker penstats" title="How the last stroke's input went: what the device sent, and how fast this screen kept up">
+							<dt>Last stroke</dt><dd>{st.kind}{st.rate ? ` · ${st.rate} samples/s` : ''}</dd>
+							<dt>First move</dt><dd>{st.firstMoveMs === null ? 'none' : `${st.firstMoveMs} ms · ${st.firstMovePx} px`}</dd>
+							<dt>Pressure</dt><dd>{p2(st.pressureDown)} → {p2(st.pressureMax)} → {p2(st.pressureLast)}</dd>
+							<dt>Frames</dt><dd>{st.frameAvg} ms · worst {st.frameMax}</dd>
+							<dt>Input → frame</dt><dd>{st.lag} ms</dd>
+							<dt>Low-latency ink</dt><dd>{st.lowLatency ? 'on' : 'off'}</dd>
+						</dl>
 					{/if}
 					<button class="item" onclick={() => (mode = mode === 'draw' ? 'observe' : 'draw')} title="Look only: pen and mouse move the view instead of drawing">
 						<Icon name="eye" size={18} /><span>Look only</span><span class="kicker" class:lit={mode === 'observe'}
@@ -2971,6 +3011,16 @@
 		color: var(--graphite);
 		font-size: 0.8rem;
 		line-height: 1.4;
+	}
+	.penstats {
+		display: grid;
+		grid-template-columns: auto 1fr;
+		gap: 2px 10px;
+		margin: 0;
+	}
+	.penstats dd {
+		margin: 0;
+		text-transform: none;
 	}
 	.fine.kicker {
 		font-size: 0.6rem;

@@ -1,3 +1,27 @@
+<script lang="ts" module>
+	/** How one stroke's input went: what the device sent and how fast frames
+	 *  came. Shown in the ⋯ menu to tell a slow device from a slow pen. */
+	export interface PenStats {
+		kind: string;
+		/** Input samples per second (coalesced events included). */
+		rate: number;
+		/** From touch-down to the first sample that moved, ms and screen px. */
+		firstMoveMs: number | null;
+		firstMovePx: number | null;
+		/** Raw pressure at touch-down, the most, and at the last sample. */
+		pressureDown: number;
+		pressureMax: number;
+		pressureLast: number;
+		/** Time between frames while drawing (ms): average and worst. */
+		frameAvg: number;
+		frameMax: number;
+		/** From an input event to the frame that drew it (ms, average). */
+		lag: number;
+		/** The browser took the low-latency hint for the live ink. */
+		lowLatency: boolean;
+	}
+</script>
+
 <script lang="ts">
 	import { flushSync, untrack } from 'svelte';
 	import { noteStore, type Presence } from '$lib/notes/noteStore.svelte';
@@ -5,7 +29,7 @@
 	import { arrowHead, constrain, shapeBox, shapeHit } from '$lib/notes/shapes';
 	import { TEXT_ASCENT, TEXT_FONT, TEXT_LINE, remeasureText, textBounds, textLines } from '$lib/notes/text';
 	import { framing, type Box, type Viewport } from '$lib/notes/viewport.svelte';
-	import { inkShape, liveInkShape, isMarker, strokeZoom, MARKER_ALPHA, type InkShape } from '$lib/notes/ink';
+	import { inkShape, liveInkShape, isMarker, strokeZoom, MARKER_ALPHA, PEN_SENSE, type InkShape } from '$lib/notes/ink';
 	import type { Brush } from '$lib/notes/model';
 	import { pageAt, PAGE_GAP, type PlacedPage } from '$lib/notes/pages';
 	import type { PageRenderer, PdfLink } from '$lib/notes/pdf';
@@ -64,6 +88,12 @@
 		/** What the last pen contact reported (button / buttons): shown next to
 		 *  the pen-button setting, to see what a pen actually sends. */
 		onpentouch?: (info: string) => void;
+		/** After each pen or finger stroke: how its input and frames went
+		 *  (for the ⋯ menu's pen readout). */
+		onpenstats?: (stats: PenStats) => void;
+		/** Our stroke in progress on its own low-latency layer (see `inkLayer`);
+		 *  off: drawn with everything else, as before. */
+		fastInk?: boolean;
 	}
 
 	type Tool = NonNullable<Props['tool']>;
@@ -89,6 +119,8 @@
 		onpen,
 		penButton = null,
 		onpentouch,
+		onpenstats,
+		fastInk = true,
 		shapeKind = 'rect',
 		coverTaps = false,
 		openCovers = true,
@@ -152,6 +184,52 @@
 	// stays black) instead of veiling it.
 	const markers = typeof document !== 'undefined' ? document.createElement('canvas') : null;
 	let mctx: CanvasRenderingContext2D | null = null;
+	// Our own stroke in progress (pen, brush) has a layer of its own, on top
+	// of everything on the page so the browser may show it straight away
+	// (`desynchronized`: low-latency canvas, which allows nothing above a
+	// transparent one). Each frame it's drawn into `liveBuf` and copied over
+	// in one go — clearing the layer itself could flash, as the screen may
+	// show it mid-draw. While only the live stroke changes, the main canvas
+	// (paper, PDF, the rest of the ink) isn't recomposited at all.
+	let inkLayer = $state<HTMLCanvasElement | null>(null);
+	let ictx: CanvasRenderingContext2D | null = null;
+	const liveBuf = typeof document !== 'undefined' ? document.createElement('canvas') : null;
+	let lbctx: CanvasRenderingContext2D | null = null;
+	/** The browser took the low-latency hint. */
+	let lowLatency = false;
+	// Not on Android: Chrome there puts a desynchronized canvas on the screen
+	// without blending it, so the transparent layer turned the whole screen
+	// black at the first touch (the user's tablet). The layer still spares
+	// the recomposite there, just without the hint.
+	const LOW_LATENCY_OK = typeof navigator !== 'undefined' && !/Android/i.test(navigator.userAgent);
+	let liveDirty = false;
+	/** The part of the layer (device px) that has ink on it. */
+	let liveShown: Rect | null = null;
+	/** Finished strokes the layer keeps showing a moment longer: the main
+	 *  canvas, going through the browser's compositor, shows them a frame or
+	 *  two later than this layer would let go of them. */
+	let lingering: { stroke: Stroke; page: PlacedPage | null; until: number }[] = [];
+	/** The stroke in progress' input and frame timings (see PenStats). */
+	let stats: {
+		kind: string;
+		downAt: number;
+		down: { x: number; y: number };
+		samples: number;
+		lastAt: number;
+		firstMoveMs: number | null;
+		firstMovePx: number | null;
+		pDown: number;
+		pMax: number;
+		pLast: number;
+		frames: number;
+		frameSum: number;
+		frameMax: number;
+		lastFrame: number;
+		pendingEvent: number;
+		lagSum: number;
+		lagN: number;
+	} | null = null;
+	const LINGER_MS = 150;
 	let dpr = 1;
 	let dirty = true; // the frame needs compositing
 	let baseDirty = true; // committed strokes or the transform changed
@@ -222,13 +300,15 @@
 		dpr = window.devicePixelRatio || 1;
 		canvas.width = Math.round(rect.width * dpr);
 		canvas.height = Math.round(rect.height * dpr);
-		for (const layer of [base, markers]) {
+		for (const layer of [base, markers, inkLayer, liveBuf]) {
 			if (!layer) continue;
 			layer.width = canvas.width;
 			layer.height = canvas.height;
 		}
 		width = rect.width;
 		height = rect.height;
+		liveShown = null; // resizing cleared the layer
+		liveDirty = true;
 		baseDirty = true;
 		markDirty();
 	}
@@ -500,13 +580,85 @@
 		c.restore();
 	}
 
-	function drawLive(c: CanvasRenderingContext2D) {
-		let live = liveStroke;
+	function drawLive(c: CanvasRenderingContext2D, st: Stroke | null = liveStroke, page = livePage, done = false) {
+		let live = st;
 		if (!live) return;
-		if (predicted.length > 0) live = { ...live, points: [...live.points, ...predicted] };
+		if (!done && predicted.length > 0) live = { ...live, points: [...live.points, ...predicted] };
+		const shape = done ? inkShape(live) : liveInkShape(live);
 		setWorldTransform(c);
-		if (livePage) onPage(c, livePage, () => drawShape(c, live.color, liveInkShape(live)));
-		else drawShape(c, live.color, liveInkShape(live));
+		if (page) onPage(c, page, () => drawShape(c, live.color, shape));
+		else drawShape(c, live.color, shape);
+	}
+
+	/** Where a stroke is on the canvas, in device px, with room for its width. */
+	function deviceBox(st: Stroke, page: PlacedPage | null, extra: StrokePoint[] = []): Rect | null {
+		let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+		for (const list of [st.points, extra])
+			for (const p of list) {
+				if (p.x < x0) x0 = p.x;
+				if (p.x > x1) x1 = p.x;
+				if (p.y < y0) y0 = p.y;
+				if (p.y > y1) y1 = p.y;
+			}
+		if (x0 > x1) return null;
+		const k = viewport.scale * dpr;
+		const ox = (page?.x ?? 0) * k + viewport.offset.x * dpr;
+		const oy = (page?.y ?? 0) * k + viewport.offset.y * dpr;
+		const pad = st.width * k + 4 * dpr;
+		return { x: x0 * k + ox - pad, y: y0 * k + oy - pad, w: (x1 - x0) * k + 2 * pad, h: (y1 - y0) * k + 2 * pad };
+	}
+
+	/** Draw our live stroke (and lingering ones) onto the ink layer: into the
+	 *  buffer, then copy the part that changed across in one operation. */
+	function renderInkLayer(now: number) {
+		if (lingering.length > 0 && lingering.some((l) => l.until <= now)) {
+			lingering = lingering.filter((l) => l.until > now);
+			liveDirty = true;
+		}
+		if (lingering.length > 0) liveDirty = true; // follows the view if it moves
+		if (!liveDirty || !ictx || !lbctx || !liveBuf) return;
+		liveDirty = false;
+		const live = liveStroke && !isMarker(liveStroke) ? liveStroke : null;
+		let area: Rect | null = null;
+		const grow = (r: Rect | null) => {
+			if (!r) return;
+			if (!area) return void (area = r);
+			const x = Math.min(area.x, r.x);
+			const y = Math.min(area.y, r.y);
+			area = { x, y, w: Math.max(area.x + area.w, r.x + r.w) - x, h: Math.max(area.y + area.h, r.y + r.h) - y };
+		};
+		if (live) grow(deviceBox(live, livePage, predicted));
+		for (const l of lingering) grow(deviceBox(l.stroke, l.page));
+		const shown: Rect | null = area;
+		grow(liveShown);
+		liveShown = shown;
+		if (!area) return;
+		// Whole device pixels, within the canvas.
+		const a = area as Rect;
+		const x = Math.max(0, Math.floor(a.x));
+		const y = Math.max(0, Math.floor(a.y));
+		const w = Math.min(liveBuf.width, Math.ceil(a.x + a.w)) - x;
+		const h = Math.min(liveBuf.height, Math.ceil(a.y + a.h)) - y;
+		if (w <= 0 || h <= 0) return;
+		const b = lbctx;
+		b.save();
+		b.setTransform(1, 0, 0, 1, 0, 0);
+		b.clearRect(x, y, w, h);
+		b.beginPath();
+		b.rect(x, y, w, h);
+		b.clip();
+		for (const l of lingering) drawLive(b, l.stroke, l.page, true);
+		if (live) drawLive(b, live, livePage);
+		b.restore();
+		const c = ictx;
+		c.save();
+		c.setTransform(1, 0, 0, 1, 0, 0);
+		c.beginPath();
+		c.rect(x, y, w, h);
+		c.clip();
+		c.globalCompositeOperation = 'copy';
+		c.drawImage(liveBuf, x, y, w, h, x, y, w, h);
+		c.restore();
 	}
 
 	/** The others' strokes in progress (markers or the rest), drawn like our
@@ -679,6 +831,23 @@
 
 	function render(now: number) {
 		stepTrack(now);
+		if (stats && drawingPointerId !== null) {
+			if (stats.lastFrame) {
+				const dt = now - stats.lastFrame;
+				stats.frames++;
+				stats.frameSum += dt;
+				stats.frameMax = Math.max(stats.frameMax, dt);
+			}
+			stats.lastFrame = now;
+			if (stats.pendingEvent) {
+				// From the newest input event to the frame that draws it.
+				const lag = Math.max(0, now - stats.pendingEvent);
+				stats.lagSum += lag;
+				stats.lagN++;
+				stats.pendingEvent = 0;
+			}
+		}
+		renderInkLayer(now);
 		if (ctx && bctx && base && mctx && markers && (dirty || baseDirty)) {
 			if (baseDirty) {
 				baseDirty = false;
@@ -711,7 +880,7 @@
 			ctx.drawImage(base, 0, 0);
 			drawOthersLive(ctx, false);
 			drawMoving(ctx, false);
-			if (liveStroke && !isMarker(liveStroke)) drawLive(ctx);
+			if (liveStroke && !isMarker(liveStroke) && !ictx) drawLive(ctx); // no ink layer
 			if (liveShape) {
 				setWorldTransform(ctx);
 				const sh = liveShape;
@@ -746,7 +915,29 @@
 		void viewport.scale;
 		void viewport.offset;
 		baseDirty = true;
+		liveDirty = true;
 		markDirty();
+	});
+
+	// The ink layer comes and goes with `fastInk` (a context's options are
+	// fixed once it's made, so it's a new canvas each time).
+	$effect(() => {
+		const el = inkLayer;
+		if (!el) {
+			ictx = null;
+			lowLatency = false;
+			markDirty(); // a stroke in progress goes back onto the main canvas
+			return;
+		}
+		ictx = el.getContext('2d', { desynchronized: LOW_LATENCY_OK });
+		lowLatency = !!ictx?.getContextAttributes?.().desynchronized;
+		untrack(() => {
+			el.width = canvas.width;
+			el.height = canvas.height;
+		});
+		liveShown = null;
+		lingering = [];
+		liveDirty = true;
 	});
 
 	// Others moved, or the overlay was toggled: recomposite only.
@@ -766,6 +957,7 @@
 		ctx = canvas.getContext('2d');
 		bctx = base?.getContext('2d') ?? null;
 		mctx = markers?.getContext('2d') ?? null;
+		lbctx = liveBuf?.getContext('2d') ?? null;
 		resize();
 		const ro = new ResizeObserver(resize);
 		ro.observe(canvas);
@@ -1559,6 +1751,8 @@
 		drawingPointerId = null;
 		lastSampleSkipped = null;
 		liveHoldUntil = 0;
+		stats = null;
+		liveDirty = true;
 		onactive?.(false);
 		markDirty();
 	}
@@ -1723,6 +1917,28 @@
 			z: strokeZoom(viewport.scale)
 		};
 		if (livePage) liveStroke.page = livePage.id;
+		// A light touch at the start and end still shows (see ink.ts).
+		if (e.pointerType === 'pen') liveStroke.sense = PEN_SENSE;
+		stats = {
+			kind: e.pointerType,
+			downAt: e.timeStamp,
+			down: at,
+			samples: 1,
+			lastAt: e.timeStamp,
+			firstMoveMs: null,
+			firstMovePx: null,
+			pDown: e.pressure,
+			pMax: e.pressure,
+			pLast: e.pressure,
+			frames: 0,
+			frameSum: 0,
+			frameMax: 0,
+			lastFrame: 0,
+			pendingEvent: e.timeStamp,
+			lagSum: 0,
+			lagN: 0
+		};
+		liveDirty = true;
 		liveSent = 0;
 		predicted = [];
 		// A finger stroke might still turn out to be a pinch, and one on a cover
@@ -1818,9 +2034,52 @@
 		if (e.pointerId !== drawingPointerId || !liveStroke) return;
 		// Use coalesced events for high-frequency pen sampling.
 		const events = e.getCoalescedEvents?.() ?? [e];
-		for (const ev of events) addSample(samplePoint(ev));
+		for (const ev of events) {
+			addSample(samplePoint(ev));
+			if (stats) noteSample(ev);
+		}
 		predicted = (e.getPredictedEvents?.() ?? []).slice(0, MAX_PREDICTED).map(samplePoint);
-		markDirty();
+		// Only the live stroke changed: its own layer, unless it's a marker
+		// (those multiply into the page, so they're drawn there).
+		if (isMarker(liveStroke) || !ictx) markDirty();
+		else liveDirty = true;
+	}
+
+	function noteSample(ev: PointerEvent) {
+		const st = stats!;
+		st.samples++;
+		st.lastAt = ev.timeStamp;
+		st.pMax = Math.max(st.pMax, ev.pressure);
+		st.pLast = ev.pressure;
+		st.pendingEvent ||= ev.timeStamp;
+		if (st.firstMoveMs === null) {
+			const at = local(ev);
+			const d = Math.hypot(at.x - st.down.x, at.y - st.down.y);
+			if (d > 0) {
+				st.firstMoveMs = ev.timeStamp - st.downAt;
+				st.firstMovePx = d;
+			}
+		}
+	}
+
+	function reportStats() {
+		const st = stats;
+		stats = null;
+		if (!st || !onpenstats || st.kind === 'mouse') return;
+		const secs = (st.lastAt - st.downAt) / 1000;
+		onpenstats({
+			kind: st.kind,
+			rate: secs > 0.05 ? Math.round((st.samples - 1) / secs) : 0,
+			firstMoveMs: st.firstMoveMs === null ? null : Math.round(st.firstMoveMs),
+			firstMovePx: st.firstMovePx === null ? null : Math.round(st.firstMovePx * 10) / 10,
+			pressureDown: st.pDown,
+			pressureMax: st.pMax,
+			pressureLast: st.pLast,
+			frameAvg: st.frames ? Math.round((st.frameSum / st.frames) * 10) / 10 : 0,
+			frameMax: Math.round(st.frameMax),
+			lag: st.lagN ? Math.round((st.lagSum / st.lagN) * 10) / 10 : 0,
+			lowLatency
+		});
 	}
 
 	function onPointerEnd(e: PointerEvent) {
@@ -1886,8 +2145,12 @@
 			// End exactly where the pen lifted, even if that sample was too close to keep.
 			if (lastSampleSkipped) liveStroke.points.push(lastSampleSkipped);
 			sendLive(); // the last points first, so the preview is whole…
-			noteStore.addStroke($state.snapshot(liveStroke) as Stroke);
+			const done = $state.snapshot(liveStroke) as Stroke;
+			noteStore.addStroke(done);
+			if (!isMarker(done)) lingering.push({ stroke: done, page: livePage, until: performance.now() + LINGER_MS });
+			reportStats();
 		}
+		liveDirty = true;
 		// …then the real stroke, then the end of the preview: the others swap
 		// one for the other without a blink.
 		if (liveTimer) clearTimeout(liveTimer);
@@ -2284,6 +2547,9 @@
 						? 'crosshair'
 						: tool}
 	></canvas>
+	{#if fastInk}
+		<canvas class="inklayer" bind:this={inkLayer} aria-hidden="true"></canvas>
+	{/if}
 	{#if selBar}
 		<div class="selbar" style:left="{selBar.left}px" style:top="{selBar.top}px">
 			<button onclick={copySelection} title="Copy (Ctrl+C) — tap with the lasso to paste">
@@ -2384,6 +2650,14 @@
 		-webkit-user-select: none;
 		user-select: none;
 		cursor: crosshair;
+	}
+	/* Above everything on the page: the low-latency path allows nothing over
+	   a transparent canvas. Only our own stroke in progress is ever on it. */
+	canvas.inklayer {
+		position: absolute;
+		inset: 0;
+		z-index: 1000;
+		pointer-events: none;
 	}
 	canvas[data-cursor='grab'] {
 		cursor: grab;

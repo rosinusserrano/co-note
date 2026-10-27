@@ -115,6 +115,7 @@ export interface LiveChunk {
 	brush: Brush;
 	sim: boolean;
 	z?: number;
+	sense?: number;
 	page?: string;
 	n: number;
 	pts: number[];
@@ -128,16 +129,17 @@ const LIVE_MAX_CHUNK = 2000;
 
 function readLiveChunk(v: any): LiveChunk | null {
 	if (!v || typeof v !== 'object') return null;
-	const { id, color, width, brush, sim, z, page, n, pts } = v;
+	const { id, color, width, brush, sim, z, sense, page, n, pts } = v;
 	if (typeof id !== 'string' || id.length > 64) return null;
 	if (typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color)) return null;
 	if (!finite(width) || width <= 0 || width > 200) return null;
 	if (brush !== 'pen' && brush !== 'brush' && brush !== 'marker') return null;
 	if (page !== undefined && (typeof page !== 'string' || page.length > 64)) return null;
 	if (z !== undefined && (!finite(z) || z < 0.05 || z > 50)) return null;
+	if (sense !== undefined && (!finite(sense) || sense < 0 || sense > 1)) return null;
 	if (!Number.isInteger(n) || n < 0 || n > LIVE_MAX_POINTS) return null;
 	if (!Array.isArray(pts) || pts.length % 3 !== 0 || pts.length > LIVE_MAX_CHUNK * 3 || !pts.every(finite)) return null;
-	return { id, color, width, brush, sim: sim === true, z, page, n, pts };
+	return { id, color, width, brush, sim: sim === true, z, sense, page, n, pts };
 }
 
 // Readable on white paper (the labels get a dark backing anyway).
@@ -530,6 +532,7 @@ class NoteStore {
 				const stroke: Stroke = { id: l.id, color: l.color, width: l.width, brush: l.brush, sim: l.sim, points: [] };
 				if (l.page) stroke.page = l.page;
 				if (l.z) stroke.z = l.z;
+				if (l.sense !== undefined) stroke.sense = l.sense;
 				this.#live.set(l.id, (e = { client, stroke, ended: null }));
 			}
 			if (e.client !== client) continue;

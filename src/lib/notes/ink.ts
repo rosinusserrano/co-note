@@ -103,6 +103,21 @@ const OUTLINE_PX = 2;
  *  (half at 400%, a quarter at 1600%). */
 export const streamlineAt = (streamline: number, z: number) => streamline * Math.min(1, 1 / Math.sqrt(z));
 
+/** How far pressure moves a new pen stroke's width from its middle
+ *  (Stroke.sense): pens report next to nothing for the first and last
+ *  moments of contact, and with the full swing a stroke's start and end
+ *  came out too faint to see. Restyles only strokes that carry it. */
+export const PEN_SENSE = 0.55;
+
+/** A stroke's pressure as its outline uses it: pulled toward the middle by
+ *  its `sense` (clamped: it comes from whoever drew the stroke). */
+function sensed(s: Stroke) {
+	const k = s.sense;
+	if (k === undefined || !Number.isFinite(k)) return (p: number) => p;
+	const c = Math.min(1, Math.max(0, k));
+	return (p: number) => 0.5 + (p - 0.5) * c;
+}
+
 /** A drawing zoom fit to store: within the viewport's range, two decimals. */
 export const strokeZoom = (scale: number) => Math.round(Math.min(20, Math.max(0.1, scale)) * 100) / 100;
 
@@ -124,10 +139,14 @@ function brushShape(s: Stroke, b: BrushPreset, last: boolean): InkShape {
 	} else {
 		// In the drawer's screen pixels, then back to world units.
 		const size = s.width * z;
+		const press = sensed(s);
 		const pts = getStrokePoints(
-			s.points.map((p) => [p.x * z, p.y * z, p.pressure]),
-			// `size` here only sets how long the start goes unbent.
-			{ size: Math.min(size, START_PX), streamline: streamlineAt(b.streamline, z), last }
+			s.points.map((p) => [p.x * z, p.y * z, press(p.pressure)]),
+			// `size` here only sets how long the start goes unbent. The last
+			// point is the sample itself, also while drawing (a finished stroke
+			// is the same either way): the tip stays on the pen instead of
+			// trailing it through the smoothing.
+			{ size: Math.min(size, START_PX), streamline: streamlineAt(b.streamline, z), last: true }
 		);
 		outline = getStrokeOutlinePoints(pts, {
 			size,

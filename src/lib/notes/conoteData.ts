@@ -57,7 +57,8 @@ export function readConoteData(json: unknown, pageCount: number): ConoteData | n
 			page: s.page as number,
 			...(brush ? { brush } : {}),
 			...(s.sim === true ? { sim: true } : {}),
-			...(num(s.z, 0.001, 1000) ? { z: s.z } : {})
+			...(num(s.z, 0.001, 1000) ? { z: s.z } : {}),
+			...(num(s.sense, 0, 1) ? { sense: s.sense } : {})
 		});
 	}
 	const texts: ConoteData['texts'] = [];

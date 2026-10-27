@@ -1,10 +1,11 @@
 #!/bin/bash
-# Build the app and publish it to https://conote.sniggles.de. No sudo needed
+# Build the app and publish it to https://conote.sniggles.de (CONOTE_WEB: another
+# web root, e.g. the dev site - deploy/dev/publish-dev.sh). No sudo needed
 # (/srv/conote-web is owned by marco). Run after any client change.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-WEB=/srv/conote-web
-[[ -d $WEB && -w $WEB ]] || { echo "$WEB missing or not writable - run: sudo bash $REPO/deploy/setup-server.sh"; exit 1; }
+WEB=${CONOTE_WEB:-/srv/conote-web}
+[[ -d $WEB && -w $WEB ]] || { echo "$WEB missing or not writable - run: sudo bash $REPO/deploy/setup-server.sh (dev: deploy/dev/setup-dev.sh)"; exit 1; }
 cd "$REPO"
 npm run build
 # Old hashed bundles stay for a while: an app still running the previous
