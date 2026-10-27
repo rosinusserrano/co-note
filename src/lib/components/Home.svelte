@@ -12,7 +12,17 @@
 		VIEW_ACCESS as ACCESS,
 		type ViewAccess
 	} from '$lib/notes/api';
-	import { noteIndex, myName, setMyName, isOwner, NAME_MAX, type NoteEntry } from '$lib/notes/noteIndex.svelte';
+	import {
+		noteIndex,
+		myName,
+		setMyName,
+		isOwner,
+		NAME_MAX,
+		cleanFolder,
+		folderParts,
+		inFolder,
+		type NoteEntry
+	} from '$lib/notes/noteIndex.svelte';
 	import { account } from '$lib/notes/account.svelte';
 	import { zotero } from '$lib/notes/zotero.svelte';
 	import { vaultAvailable } from '$lib/notes/vault';
@@ -198,21 +208,31 @@
 
 	// --- Folders: labels on notes, kept in the account for its notes -----------
 
+	// Folders nest (a folder is a path, "Master thesis/Meeting slides"). The
+	// list shows one folder at a time, like a file browser: the path to it,
+	// its name, its subfolders, then the notes right in it. The top shows
+	// the top folders and the notes in none.
 	const FOLDER_KEY = 'conote:folder';
-	/** The folder the list shows (null: everything), remembered on this device. */
-	let folderPick = $state<string | null>(
+	/** The folder the list shows ('' = the top), remembered on this device. */
+	let folderPick = $state<string>(
 		(() => {
 			try {
-				return localStorage.getItem(FOLDER_KEY);
+				return localStorage.getItem(FOLDER_KEY) ?? '';
 			} catch {
-				return null;
+				return '';
 			}
 		})()
 	);
-	/** A folder that emptied (its last note moved out) shows everything again. */
-	const folder = $derived(folderPick && noteIndex.folders.includes(folderPick) ? folderPick : null);
-	function showFolder(f: string | null) {
+	/** A folder that emptied (its last note moved out) shows its nearest parent that's left. */
+	const folder = $derived.by(() => {
+		const all = noteIndex.folders;
+		let f = folderPick;
+		while (f && !all.includes(f)) f = parentFolder(f);
+		return f;
+	});
+	function showFolder(f: string) {
 		folderPick = f;
+		filing = null;
 		try {
 			if (f) localStorage.setItem(FOLDER_KEY, f);
 			else localStorage.removeItem(FOLDER_KEY);
@@ -220,8 +240,14 @@
 			/* not remembered */
 		}
 	}
-	const listed = $derived(noteIndex.recent.filter((n) => !folder || n.folder === folder));
-	const unfiled = $derived(noteIndex.notes.filter((n) => !n.folder).length);
+	const parentFolder = (f: string) => folderParts(f).slice(0, -1).join('/');
+	const folderName = (f: string) => folderParts(f).at(-1) ?? '';
+	/** The folders above the one shown, top first. */
+	const crumbs = $derived(folderParts(folder).slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join('/')));
+	const subfolders = $derived(noteIndex.subfolders(folder));
+	const listed = $derived(noteIndex.recent.filter((n) => (n.folder ?? '') === folder));
+	/** Notes in a folder, its subfolders' included. */
+	const countIn = (f: string) => noteIndex.notes.filter((n) => inFolder(n.folder, f)).length;
 
 	/** The note whose folder is being picked (its row opens a strip of folders). */
 	let filing = $state<string | null>(null);
@@ -229,7 +255,7 @@
 
 	/** File a note into `to` ('' = no folder): here, and in the account if it's there. */
 	async function fileNote(n: NoteEntry, to: string) {
-		const clean = to.replace(/\s+/g, ' ').trim().slice(0, 40);
+		const clean = cleanFolder(to);
 		filing = null;
 		newFolder = '';
 		const before = n.folder ?? '';
@@ -296,22 +322,28 @@
 
 			{#if returning}
 				<section class="index">
+					{#if folder}
+						<nav class="crumbs" aria-label="Folder path">
+							<button class="fchip" onclick={() => showFolder('')}>All</button>
+							{#each crumbs as c (c)}
+								<Icon name="chevronRight" size={14} />
+								<button class="fchip" onclick={() => showFolder(c)}><Icon name="folder" size={15} />{folderName(c)}</button>
+							{/each}
+							<Icon name="chevronRight" size={14} />
+						</nav>
+					{/if}
 					<div class="indexhead">
-						<h2>{folder ?? 'My notes'}</h2>
-						<span class="kicker">{folder ? `${listed.length} of ${noteIndex.notes.length}` : `${noteIndex.notes.length} on this device`}</span>
+						<h2>{folder ? folderName(folder) : 'My notes'}</h2>
+						<span class="kicker">{folder ? `${countIn(folder)} of ${noteIndex.notes.length}` : `${noteIndex.notes.length} on this device`}</span>
 					</div>
-					{#if noteIndex.folders.length > 0}
-						<div class="folders" role="tablist" aria-label="Folders">
-							<button role="tab" class="fchip" class:on={!folder} aria-selected={!folder} onclick={() => showFolder(null)}>
-								All <span class="kicker">{noteIndex.notes.length}</span>
-							</button>
-							{#each noteIndex.folders as f (f)}
-								<button role="tab" class="fchip" class:on={folder === f} aria-selected={folder === f} onclick={() => showFolder(f)}>
-									<Icon name="folder" size={15} />{f}
-									<span class="kicker">{noteIndex.notes.filter((n) => n.folder === f).length}</span>
+					{#if subfolders.length > 0}
+						<div class="folders" aria-label={folder ? 'Subfolders' : 'Folders'}>
+							{#each subfolders as f (f)}
+								<button class="fchip" onclick={() => showFolder(f)}>
+									<Icon name="folder" size={15} />{folderName(f)}
+									<span class="kicker">{countIn(f)}</span>
 								</button>
 							{/each}
-							{#if unfiled && !folder}<span class="kicker loose">{unfiled} in no folder</span>{/if}
 						</div>
 					{/if}
 					<ol>
@@ -347,18 +379,27 @@
 										transition:fly={{ y: -6, duration: 160 }}
 										onsubmit={(e) => {
 											e.preventDefault();
-											if (newFolder.trim()) void fileNote(n, newFolder);
+											if (cleanFolder(newFolder)) void fileNote(n, folder ? `${folder}/${newFolder}` : newFolder);
 										}}
 									>
 										<span class="kicker">Folder</span>
 										{#each noteIndex.folders as f (f)}
-											<button type="button" class="fchip" class:on={n.folder === f} onclick={() => fileNote(n, f)}>{f}</button>
+											<button type="button" class="fchip" class:on={n.folder === f} onclick={() => fileNote(n, f)}>
+												{#each folderParts(f) as part, i}{#if i}<span class="sep">/</span>{/if}{part}{/each}
+											</button>
 										{/each}
 										{#if n.folder}
 											<button type="button" class="fchip" onclick={() => fileNote(n, '')}>No folder</button>
 										{/if}
-										<input class="input" bind:value={newFolder} maxlength="40" placeholder="New folder" aria-label="New folder name" />
-										<button class="btn" disabled={!newFolder.trim()}>Move</button>
+										<!-- A new folder goes inside the one shown; "a/b" nests further. -->
+										<input
+											class="input"
+											bind:value={newFolder}
+											maxlength="200"
+											placeholder={folder ? `New folder in ${folderName(folder)}` : 'New folder'}
+											aria-label="New folder name"
+										/>
+										<button class="btn" disabled={!cleanFolder(newFolder)}>Move</button>
 									</form>
 								{/if}
 							</li>
@@ -1031,13 +1072,15 @@
 		margin-left: 0;
 	}
 
-	/* Folders: chips over the list, and a strip under a note to file it. */
+	/* Folders: the path above the name, subfolders under it, and a strip
+	   under a note to file it. */
 	.folders {
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
 		gap: 0.4rem;
-		padding: 0.8rem 0 0.4rem;
+		padding: 0.8rem 0;
+		border-bottom: 1px solid var(--rule);
 	}
 	.fchip {
 		display: inline-flex;
@@ -1062,12 +1105,20 @@
 		border-color: var(--ink);
 		color: var(--chalk);
 	}
-	.fchip.on .kicker {
-		color: var(--lime);
-	}
-	.loose {
+	.crumbs {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.3rem;
+		padding-bottom: 0.7rem;
 		color: var(--smoke);
-		margin-left: 0.3rem;
+	}
+	.fchip .sep {
+		color: var(--smoke);
+		margin: 0 0.1rem;
+	}
+	.fchip.on .sep {
+		color: var(--lime);
 	}
 	.filebar {
 		flex-basis: 100%;

@@ -414,8 +414,20 @@ export const wasEnded = (id) => id in ended;
 
 const accountKey = (raw) => String(raw ?? '').trim().toLowerCase();
 
-/** Longest folder name; '' = no folder. */
+/** Longest folder name, and how deep folders nest. */
 const FOLDER_MAX = 40;
+const FOLDER_DEPTH = 6;
+
+/** A folder is a path, parents first: "Master thesis/Meeting slides".
+ *  Spaces collapsed, empty parts dropped; '' = no folder. Null if a part is
+ *  too long or it's nested too deep. */
+function folderPath(raw) {
+	const parts = String(raw ?? '')
+		.split('/')
+		.map((p) => p.replace(/\s+/g, ' ').trim())
+		.filter(Boolean);
+	return parts.length > FOLDER_DEPTH || parts.some((p) => p.length > FOLDER_MAX) ? null : parts.join('/');
+}
 
 function accountNameError(key) {
 	if (!/^[a-z0-9][a-z0-9_-]{1,22}[a-z0-9]$/.test(key))
@@ -525,9 +537,9 @@ export async function addToAccount(account, { notes: list }) {
 		}
 		grant(account, note, note.account === account.key ? 'edit' : v.role);
 		// A folder given on this device, unless the account already filed it.
-		const folder = typeof it.folder === 'string' ? it.folder.replace(/\s+/g, ' ').trim() : '';
+		const folder = typeof it.folder === 'string' ? folderPath(it.folder) : '';
 		const g = account.notes[note.id];
-		if (folder && folder.length <= FOLDER_MAX && !g.folder) {
+		if (folder && !g.folder) {
 			g.folder = folder;
 			saveAccounts();
 		}
@@ -536,13 +548,14 @@ export async function addToAccount(account, { notes: list }) {
 	return { added };
 }
 
-/** File a note the account holds into a folder (a name; '' takes it out).
+/** File a note the account holds into a folder (a path; '' takes it out).
  *  Folders are just labels on the account's notes: none exists empty. */
 export function setFolder(account, { id, folder }) {
 	const g = account.notes[String(id ?? '')];
 	if (!g) throw new HttpError(404, "That note isn't in your account.");
-	const name = String(folder ?? '').replace(/\s+/g, ' ').trim();
-	if (name.length > FOLDER_MAX) throw new HttpError(400, `Folder names are at most ${FOLDER_MAX} characters.`);
+	const name = folderPath(folder);
+	if (name === null)
+		throw new HttpError(400, `Folder names are at most ${FOLDER_MAX} characters, and folders nest at most ${FOLDER_DEPTH} deep.`);
 	if (name) g.folder = name;
 	else delete g.folder;
 	saveAccounts();

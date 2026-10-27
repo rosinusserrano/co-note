@@ -6,6 +6,7 @@
 	import { zoteroVerify } from '$lib/notes/api';
 	import { zotero } from '$lib/notes/zotero.svelte';
 	import { account } from '$lib/notes/account.svelte';
+	import { vaultAvailable } from '$lib/notes/vault';
 
 	interface Props {
 		/** Shown as Cancel once a connection exists (leave the form unchanged). */
@@ -27,6 +28,30 @@
 		busy: false,
 		error: ''
 	});
+
+	// Signed in from before the vault existed, this device can't open the
+	// account's copy of the connection: the password once more derives the key,
+	// then pulls the connection another device put there, or pushes this one.
+	const locked = $derived(account.signedIn && !account.vaultKey && vaultAvailable());
+	const had = untrack(() => !!zotero.settings);
+	let unlock = $state({ password: '', busy: false, error: '' });
+
+	async function bringHere(e: SubmitEvent) {
+		e.preventDefault();
+		unlock.busy = true;
+		unlock.error = '';
+		try {
+			await account.unlock(unlock.password);
+			unlock.password = '';
+			if (had) return;
+			if (zotero.settings) onconnected?.();
+			else unlock.error = 'Your account has no Zotero connection yet. Connect below, and your other devices get it too.';
+		} catch (err) {
+			unlock.error = err instanceof Error ? err.message : 'Something went wrong.';
+		} finally {
+			unlock.busy = false;
+		}
+	}
 
 	async function connect(e: SubmitEvent) {
 		e.preventDefault();
@@ -56,6 +81,28 @@
 		}
 	}
 </script>
+
+{#if locked || unlock.error}
+	<form class="stack unlock" onsubmit={bringHere}>
+		<p class="fine">
+			{had
+				? 'This connection is only on this device. Enter your password to keep it in your account, for your other devices.'
+				: 'Connected on another device? Enter your password to bring it here.'}
+		</p>
+		<div class="row">
+			<input
+				class="input grow"
+				type="password"
+				bind:value={unlock.password}
+				placeholder="Account password"
+				autocomplete="current-password"
+				required
+			/>
+			<button class="btn" disabled={unlock.busy}>{unlock.busy ? '…' : had ? 'Keep in account' : 'Bring here'}</button>
+		</div>
+		{#if unlock.error}<p class="err">{unlock.error}</p>{/if}
+	</form>
+{/if}
 
 <form class="stack" onsubmit={connect}>
 	<p class="fine">
@@ -138,5 +185,14 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.5rem;
+	}
+	.unlock {
+		padding-bottom: 0.9rem;
+		margin-bottom: 0.9rem;
+		border-bottom: 1px solid var(--rule);
+	}
+	.grow {
+		flex: 1;
+		min-width: 0;
 	}
 </style>

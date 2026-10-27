@@ -239,6 +239,17 @@ chosen device.
   removes the layer (the stroke in progress on the main canvas), survives
   a reload, on brings it back. Thinnest pen 0.1 pt, stored as such, a ~2
   px hairline at 2000%; the log slider's ends and middle.
+  Subfolders & Zotero round (22 + 11 checks, plus round5, unlock, vault,
+  zot re-run green): the top lists folders and unfiled notes only; in a
+  folder the path, its name, subfolders with counts, its notes; a new
+  folder typed in a folder nests there, the account keeps the path; a
+  note made in a subfolder goes into it; path buttons go up; emptied
+  folders fall back; the server tidies paths and refuses 7 levels or a
+  41-character part. A pre-vault device without Zotero brings the
+  account's connection with its password (start page and a note's
+  panel), a wrong one refused, an account without one says so; a
+  pre-vault connected device keeps its connection in the account from
+  *Change*, and a new device gets it.
 - **Not yet verified on real hardware:** on-device stylus feel and the Android
   install path over HTTPS.
 - **Next:** see `ROADMAP.md`. Direct links run *alongside* the relay; the relay
@@ -534,9 +545,17 @@ must be preserved:
   the same way. Without an account, or for notes not in it, the folder is
   only this device's (`NoteEntry.folder`); signing in pushes it along with
   the note (`/api/account/add`, unless the account already filed it). No
-  folder exists empty. Home shows chips over the list (the picked one
-  remembered per device, `conote:folder`) and a strip under a note to file
-  it; a note made or joined while a folder shows goes into it.
+  folder exists empty. **Folders nest**: a folder is a path, parents
+  first (`Master thesis/Meeting slides`; parts ≤ 40 characters, ≤ 6 deep,
+  tidied by `cleanFolder` / the server's `folderPath`). Home shows one
+  folder at a time like a file browser (the shown one remembered per
+  device, `conote:folder`; an emptied one falls back to its nearest
+  parent): the path above as buttons (*All* › parents), its name, its
+  subfolders (counts include everything below), then the notes right in
+  it; the top shows the top folders and the notes in none. A strip under
+  a note files it (folders by path; a new one typed goes inside the folder
+  shown, `a/b` nests further); a note made or joined while a folder shows
+  goes into it.
 - **Signing out forgets the account's notes on the device** (entries with
   `via` = that account, and their local data): a borrowed laptop keeps
   nothing. Entries joined signed out stay.
@@ -567,8 +586,10 @@ must be preserved:
   `account.sync()` → `pullVault()`: the newer `at` wins (pre-vault settings
   count as `at = 1`); a local change pushes (`zotero.onchange`); a
   disconnect is pushed as `zotero: null`. Sessions from before the vault have
-  no key until the password is entered once more (Account tab →
-  `account.unlock`). Signing out drops a connection that came via the vault.
+  no key until the password is entered once more (`account.unlock`):
+  `ZoteroConnect` asks for it — on a device without a connection *Bring
+  here* (pulls the account's), on one with *Keep in account* (pushes
+  this one's) — in the note's Zotero panel and on the Account tab. Signing out drops a connection that came via the vault.
   Needs Web Crypto (https / localhost); elsewhere the vault is off. `/api/zotero/{verify,search,pdfs}` are JSON routes;
   `/api/zotero/file` returns the PDF; `/api/zotero/save` takes
   `[u32 length][JSON meta][PDF]`. Budget per IP and per account.

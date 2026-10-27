@@ -31,8 +31,9 @@ export interface NoteEntry {
 	private?: boolean;
 	/** The account this entry came from or was saved to: signing out forgets it. */
 	via?: string;
-	/** The folder it's filed in on the start page ('' or absent: none). Kept
-	 *  in the account for its notes, else only on this device. */
+	/** The folder it's filed in on the start page ('' or absent: none), a
+	 *  path with its parents first ("Master thesis/Meeting slides"). Kept in
+	 *  the account for its notes, else only on this device. */
 	folder?: string;
 	openedAt: number;
 }
@@ -105,11 +106,20 @@ class NoteIndex {
 		this.#persist();
 	}
 
-	/** Every folder in use, sorted. */
+	/** Every folder in use, and their parents, sorted. */
 	get folders(): string[] {
-		return [...new Set(this.notes.map((n) => n.folder).filter((f): f is string => !!f))].sort((a, b) =>
-			a.localeCompare(b, undefined, { sensitivity: 'base' })
-		);
+		const all = new Set<string>();
+		for (const n of this.notes) {
+			const parts = folderParts(n.folder);
+			for (let i = 1; i <= parts.length; i++) all.add(parts.slice(0, i).join('/'));
+		}
+		return [...all].sort(byName);
+	}
+
+	/** The folders right inside `parent` ('' = the top). */
+	subfolders(parent: string): string[] {
+		const depth = folderParts(parent).length + 1;
+		return this.folders.filter((f) => folderParts(f).length === depth && inFolder(f, parent));
 	}
 
 	touch(id: string) {
@@ -148,6 +158,31 @@ function isEntry(v: unknown): v is NoteEntry {
 }
 
 export const noteIndex = new NoteIndex();
+
+// --- Folders: paths, parents first ('' = none) --------------------------------
+
+/** Longest folder name, and how deep folders nest (the server holds the same). */
+export const FOLDER_MAX = 40;
+export const FOLDER_DEPTH = 6;
+
+export const folderParts = (f: string | undefined): string[] => (f ? f.split('/') : []);
+
+/** `f` is `parent` or somewhere below it ('' holds everything). */
+export const inFolder = (f: string | undefined, parent: string) =>
+	!parent || f === parent || !!f?.startsWith(parent + '/');
+
+/** Tidy a typed folder: "a / b" → "a/b", spaces collapsed, parts and depth cut. */
+export function cleanFolder(raw: string): string {
+	return raw
+		.split('/')
+		.map((p) => p.replace(/\s+/g, ' ').trim().slice(0, FOLDER_MAX))
+		.filter(Boolean)
+		.slice(0, FOLDER_DEPTH)
+		.join('/');
+}
+
+const byName = (a: string, b: string) =>
+	a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true });
 
 const NAME_KEY = 'conote:name';
 /** Longest name kept; presence labels are cut at 40 on the receiving side anyway. */
