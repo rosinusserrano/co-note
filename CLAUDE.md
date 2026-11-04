@@ -834,8 +834,10 @@ sender. Whatever arrives on two paths (a link and the relay) Yjs dedupes.
   sync is unaffected (different message type), which is what makes it easy to miss.
 - **Presence** = awareness fields `label`, `cursor` (world point or null) and
   `view` (world rect this session shows). `label` is the name typed on
-  joining/creating (optional, per device: `myName()` in `noteIndex`,
-  localStorage `conote:name`), else `"<Role> · <device>"`; it's what cursor
+  joining/creating, or set from inside a note with *Rename* on your own row
+  of the people panel (sent at once, `setPresence({label})`; optional, per
+  device: `myName()` in `noteIndex`, localStorage `conote:name` — so two
+  devices of one account can be told apart), else `"<Role> · <device>"`; it's what cursor
   tags, view frames, the people list, focus chips and the pulled notice show.
   Others' cursors and view frames are **drawn only if switched on** (people
   panel, per device `conote:others`, off by default — the user's call);

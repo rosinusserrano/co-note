@@ -109,7 +109,7 @@ export const PULL_MOTIONS: PullMotion[] = ['direct', 'glide', 'arc'];
 const PULL_TTL_MS = 4000;
 
 /** What this session publishes about itself (see Presence). */
-export type LocalPresence = Partial<Pick<Presence, 'cursor' | 'view' | 'laser' | 'lead'>> & {
+export type LocalPresence = Partial<Pick<Presence, 'label' | 'cursor' | 'view' | 'laser' | 'lead'>> & {
 	pull?: { n: number; view: Rect; motion: PullMotion };
 	live?: LiveChunk | null;
 };

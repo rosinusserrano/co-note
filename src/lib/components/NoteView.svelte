@@ -8,7 +8,7 @@
 	import ZoteroConnect from './ZoteroConnect.svelte';
 	import { noteStore, destroyNoteData, type PageRange, type PullMotion, PULL_MOTIONS } from '$lib/notes/noteStore.svelte';
 	import type { PdfChapter } from '$lib/notes/pdf';
-	import { noteIndex, myName, isOwner, type NoteEntry } from '$lib/notes/noteIndex.svelte';
+	import { noteIndex, myName, setMyName, NAME_MAX, isOwner, type NoteEntry } from '$lib/notes/noteIndex.svelte';
 	import { account } from '$lib/notes/account.svelte';
 	import {
 		joinNote,
@@ -595,14 +595,30 @@
 		});
 	});
 
+	// How the others' screens label us: this device's name (given on joining,
+	// or renamed in the people panel), else role and a guess at the device.
+	const fallbackLabel = $derived(
+		`${owner ? 'Owner' : canEdit ? 'Editor' : 'Observer'} · ${matchMedia('(pointer: coarse)').matches ? 'tablet' : 'computer'}`
+	);
+	let me = $state(myName());
+	const myLabel = $derived(me || fallbackLabel);
+	/** The name field in the people panel, while open. */
+	let renaming = $state<string | null>(null);
+	function saveName() {
+		if (renaming === null) return;
+		setMyName(renaming);
+		me = myName();
+		renaming = null;
+		noteStore.setPresence({ label: myLabel });
+	}
+	const focusNow = (el: HTMLInputElement) => {
+		el.focus();
+		el.select();
+	};
+
 	onMount(() => {
 		noteIndex.touch(entry.id);
-		// How the others' screens label us: the name given on joining, else
-		// role and a guess at the device.
-		const role = owner ? 'Owner' : canEdit ? 'Editor' : 'Observer';
-		const device = matchMedia('(pointer: coarse)').matches ? 'tablet' : 'computer';
-		const label = myName() || `${role} · ${device}`;
-		noteStore.connect(entry.id, { token: entry.token, label, owner: entry.ownerProof });
+		noteStore.connect(entry.id, { token: entry.token, label: myLabel, owner: entry.ownerProof });
 		// Owner devices from before pulls existed have the key but no proof yet.
 		if (entry.ownerKey && !entry.ownerProof) {
 			const id = entry.id;
@@ -1936,8 +1952,31 @@
 				</div>
 				<ul class="who">
 					<li>
-						<span class="face me">{roleLabel.charAt(0)}</span>
-						<span class="wl">You <span class="kicker">{roleLabel}</span></span>
+						<span class="face me">{(me || roleLabel).charAt(0)}</span>
+						{#if renaming !== null}
+							<input
+								class="input namefield"
+								bind:value={renaming}
+								use:focusNow
+								maxlength={NAME_MAX}
+								autocomplete="nickname"
+								placeholder={fallbackLabel}
+								aria-label="Your name on this device"
+								onkeydown={(e) => {
+									if (e.key === 'Enter') saveName();
+									else if (e.key === 'Escape') {
+										e.stopPropagation();
+										renaming = null;
+									}
+								}}
+								onblur={saveName}
+							/>
+						{:else}
+							<span class="wl">{me || 'You'} <span class="kicker">{me ? 'you · ' : ''}{roleLabel}</span></span>
+							<button class="mini" onclick={() => (renaming = me)} title="How the others see this device, e.g. Tablet or Desk">
+								Rename
+							</button>
+						{/if}
 					</li>
 					{#each noteStore.presence as p (p.id)}
 						<li>
@@ -3407,6 +3446,13 @@
 	.save:disabled {
 		opacity: 0.5;
 		cursor: default;
+	}
+
+	.namefield {
+		flex: 1;
+		min-width: 0;
+		padding: 0.35rem 0.6rem;
+		font-size: 0.9rem;
 	}
 
 	/* Small text buttons inside panels and notices */
