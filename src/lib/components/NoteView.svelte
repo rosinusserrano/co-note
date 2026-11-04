@@ -6,7 +6,7 @@
 	import PagePicker from './PagePicker.svelte';
 	import Icon, { type IconName } from './Icon.svelte';
 	import ZoteroConnect from './ZoteroConnect.svelte';
-	import { noteStore, destroyNoteData, type PageRange } from '$lib/notes/noteStore.svelte';
+	import { noteStore, destroyNoteData, type PageRange, type PullMotion, PULL_MOTIONS } from '$lib/notes/noteStore.svelte';
 	import type { PdfChapter } from '$lib/notes/pdf';
 	import { noteIndex, myName, isOwner, type NoteEntry } from '$lib/notes/noteIndex.svelte';
 	import { account } from '$lib/notes/account.svelte';
@@ -591,7 +591,7 @@
 		if (!id || !owner || !bringAlong) return;
 		untrack(() => {
 			const p = noteStore.pages.find((q) => q.id === id);
-			if (p && noteStore.peers > 1 && noteStore.access === 'ok') noteStore.pullEveryone({ x: p.x, y: p.y, w: p.w, h: p.h });
+			if (p && noteStore.peers > 1 && noteStore.access === 'ok') noteStore.pullEveryone({ x: p.x, y: p.y, w: p.w, h: p.h }, pullMotion);
 		});
 	});
 
@@ -660,9 +660,29 @@
 	let pullSent = $state(false);
 	let pullSentTimer: ReturnType<typeof setTimeout> | undefined;
 
+	/** How pulled devices get here (the owner's choice, per device). */
+	const MOTION_KEY = 'conote:pullMotion';
+	let pullMotion = $state<PullMotion>(readMotion());
+	function readMotion(): PullMotion {
+		try {
+			const m = localStorage.getItem(MOTION_KEY) as PullMotion;
+			return PULL_MOTIONS.includes(m) ? m : 'direct';
+		} catch {
+			return 'direct';
+		}
+	}
+	function setMotion(m: PullMotion) {
+		pullMotion = m;
+		try {
+			localStorage.setItem(MOTION_KEY, m);
+		} catch {
+			/* not remembered, still used this session */
+		}
+	}
+
 	function pullEveryone() {
 		if (canvasWidth <= 0 || canvasHeight <= 0) return;
-		noteStore.pullEveryone(viewport.visible(canvasWidth, canvasHeight));
+		noteStore.pullEveryone(viewport.visible(canvasWidth, canvasHeight), pullMotion);
 		pullSent = true;
 		clearTimeout(pullSentTimer);
 		pullSentTimer = setTimeout(() => (pullSent = false), 1500);
@@ -713,7 +733,7 @@
 		if (!p) return;
 		untrack(() => {
 			follow = null; // or the next redraw would frame something else again
-			canvasRef?.showView(p.view);
+			canvasRef?.showView(p.view, p.motion);
 			pulledBy = { label: p.label || 'The owner', color: p.color };
 			clearTimeout(pulledTimer);
 			pulledTimer = setTimeout(() => (pulledBy = null), 3000);
@@ -1944,6 +1964,14 @@
 						<Icon name={pullSent ? 'check' : 'gather'} size={18} />
 						{pullSent ? 'Sent' : 'Bring everyone here'}
 					</button>
+					<div class="seg" role="radiogroup" aria-label="How they get here">
+						{#each [['direct', 'Direct'], ['glide', 'Glide'], ['arc', 'Arc']] as [m, name] (m)}
+							<label title={m === 'direct' ? 'Jump straight there' : m === 'glide' ? 'Zoom and slide there' : 'Zoom out and back in'}>
+								<input type="radio" name="pullmotion" checked={pullMotion === m} onchange={() => setMotion(m as PullMotion)} />
+								{name}
+							</label>
+						{/each}
+					</div>
 					<label class="switch">
 						<input type="checkbox" checked={leading} onchange={toggleLead} disabled={noteStore.access !== 'ok'} />
 						<span class="track"></span>

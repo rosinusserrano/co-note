@@ -24,7 +24,7 @@
 
 <script lang="ts">
 	import { flushSync, untrack } from 'svelte';
-	import { noteStore, type Presence } from '$lib/notes/noteStore.svelte';
+	import { noteStore, type Presence, type PullMotion } from '$lib/notes/noteStore.svelte';
 	import { uid, type Shape, type ShapeKind, type Stroke, type StrokePoint, type TextBox } from '$lib/notes/model';
 	import { arrowHead, constrain, shapeBox, shapeHit } from '$lib/notes/shapes';
 	import { TEXT_ASCENT, TEXT_FONT, TEXT_LINE, remeasureText, textBounds, textLines } from '$lib/notes/text';
@@ -176,6 +176,8 @@
 	const PULL_MIN_MS = 500;
 	const PULL_MS_PER_EFOLD = 480;
 	const PULL_MAX_MS = 2300;
+	/** The 'glide' pull motion: always this long. */
+	const GLIDE_MS = 600;
 
 	let canvas: HTMLCanvasElement;
 	let ctx: CanvasRenderingContext2D | null = null;
@@ -2094,7 +2096,7 @@
 		if (pendingView && !busy()) {
 			const v = pendingView;
 			pendingView = null;
-			showView(v);
+			showView(v.view, v.motion);
 		}
 	}
 
@@ -2349,7 +2351,7 @@
 
 	// --- Being shown somewhere (the owner's pull) -------------------------------
 
-	let pendingView: { x: number; y: number; w: number; h: number } | null = null;
+	let pendingView: { view: Rect; motion: PullMotion } | null = null;
 
 	/** Is the pen/mouse/fingers in the middle of something? */
 	const busy = () =>
@@ -2363,11 +2365,14 @@
 		touches.size > 0;
 
 	/**
-	 * Glide to show all of `view` (a world rect, e.g. another session's screen),
+	 * Show all of `view` (a world rect, e.g. another session's screen),
 	 * centred. Waits if a stroke or gesture is under way: moving the view
 	 * under a pen mid-stroke would kink the line.
 	 *
-	 * The way there is an arc, like something thrown: the zoom (log of the
+	 * `motion` (the owner's choice): 'direct' jumps there; 'glide' eases
+	 * zoom and centre along the straight way in GLIDE_MS; 'arc' (below).
+	 *
+	 * The arc, like something thrown: the zoom (log of the
 	 * view's width) is a parabola in time, out and back in, peaking where
 	 * both where we are and where we're going are in sight (`outerView`).
 	 * The position eases along the straight line between the two centres,
@@ -2376,10 +2381,10 @@
 	 * inside the view (or around it) makes the parabola's top fall on an end:
 	 * a plain zoom in (or out), no detour.
 	 */
-	export function showView(view: { x: number; y: number; w: number; h: number }) {
+	export function showView(view: Rect, motion: PullMotion = 'arc') {
 		if (width <= 0 || height <= 0) return;
 		if (busy()) {
-			pendingView = view;
+			pendingView = { view, motion };
 			return;
 		}
 		stopGlide();
@@ -2387,9 +2392,14 @@
 		const to = framing({ x0: view.x, y0: view.y, x1: view.x + view.w, y1: view.y + view.h }, width, height);
 		const from = viewport.visible(width, height);
 		const target = { x: -to.offset.x / to.scale, y: -to.offset.y / to.scale, w: width / to.scale, h: height / to.scale };
-		const path = arc(from, target, outerView(from, target).w);
+		if (motion === 'direct') {
+			viewport.scale = to.scale;
+			viewport.offset = to.offset;
+			return;
+		}
+		const path = motion === 'glide' ? straight(from, target) : arc(from, target, outerView(from, target).w);
 		if (path.efolds < 1e-4 && Math.abs(target.x - from.x) * to.scale < 0.5 && Math.abs(target.y - from.y) * to.scale < 0.5) return;
-		const duration = Math.min(PULL_MAX_MS, PULL_MIN_MS + PULL_MS_PER_EFOLD * path.efolds);
+		const duration = motion === 'glide' ? GLIDE_MS : Math.min(PULL_MAX_MS, PULL_MIN_MS + PULL_MS_PER_EFOLD * path.efolds);
 		const t0 = performance.now();
 		const step = (t: number) => {
 			// A frame's timestamp can be from before t0 (the pull came in mid-frame
@@ -2420,6 +2430,27 @@
 		if (w / h < aspect) w = h * aspect;
 		else h = w / aspect;
 		return { x: cx - w / 2, y: cy - h / 2, w, h };
+	}
+
+	/** The straight way from rect `a` to rect `b`: log width and centre move
+	 *  together, eased in and out. */
+	function straight(a: Rect, b: Rect) {
+		const la = Math.log(a.w);
+		const lb = Math.log(b.w);
+		const ca = { x: a.x + a.w / 2, y: a.y + a.h / 2 };
+		const cb = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
+		const aspect = a.h / a.w;
+		return {
+			efolds: Math.abs(lb - la),
+			at(k: number): Rect {
+				if (k >= 1) return b;
+				const e = k < 0.5 ? 4 * k ** 3 : 1 - (2 - 2 * k) ** 3 / 2;
+				const w = Math.exp(la + (lb - la) * e);
+				const cx = ca.x + (cb.x - ca.x) * e;
+				const cy = ca.y + (cb.y - ca.y) * e;
+				return { x: cx - w / 2, y: cy - (w * aspect) / 2, w, h: w * aspect };
+			}
+		};
 	}
 
 	/**

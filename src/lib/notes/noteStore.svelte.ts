@@ -94,9 +94,15 @@ export interface Presence {
 export interface Pull {
 	n: number;
 	view: { x: number; y: number; w: number; h: number };
+	motion: PullMotion;
 	label: string;
 	color: string;
 }
+
+/** How a pulled device gets there, chosen by the owner: a jump, a straight
+ *  glide, or the arc out and back in. Pulls without one (older owners) arc. */
+export type PullMotion = 'direct' | 'glide' | 'arc';
+export const PULL_MOTIONS: PullMotion[] = ['direct', 'glide', 'arc'];
 
 /** How long the owner's `pull` stays in its presence. A device that connects
  *  within this window is pulled too; one that comes later isn't. */
@@ -104,7 +110,7 @@ const PULL_TTL_MS = 4000;
 
 /** What this session publishes about itself (see Presence). */
 export type LocalPresence = Partial<Pick<Presence, 'cursor' | 'view' | 'laser' | 'lead'>> & {
-	pull?: { n: number; view: Rect };
+	pull?: { n: number; view: Rect; motion: PullMotion };
 	live?: LiveChunk | null;
 };
 
@@ -507,8 +513,8 @@ class NoteStore {
 	/** Bring everyone else to `view` (world rect): published in our presence
 	 *  for a few seconds. Only takes effect from the owner's device; the relay
 	 *  strips it from anyone else's. */
-	pullEveryone(view: Rect) {
-		this.setPresence({ pull: { n: ++this.#pullSeq, view } });
+	pullEveryone(view: Rect, motion: PullMotion) {
+		this.setPresence({ pull: { n: ++this.#pullSeq, view, motion } });
 		if (this.#pullTimer) clearTimeout(this.#pullTimer);
 		const ws = this.#ws;
 		this.#pullTimer = setTimeout(() => {
@@ -531,6 +537,7 @@ class NoteStore {
 			this.pulled = {
 				n: (this.pulled?.n ?? 0) + 1,
 				view,
+				motion: PULL_MOTIONS.includes(p.motion) ? p.motion : 'arc',
 				label: who?.label ?? '',
 				color: who?.color ?? PRESENCE_COLORS[0]
 			};

@@ -227,7 +227,8 @@ to find each other. Once they've found each other, the actual drawing data flows
   their view (one-shot; the relay only lets the owner's connection send it).
   Its sticky sibling *Everyone follows me* is done too: the others keep
   following the owner's view until they move by hand (a notice offers to
-  follow again) or the owner switches it off.
+  follow again) or the owner switches it off. The owner picks how the
+  others get there: Direct (a jump, the default), Glide or Arc.
 - ~~**Stroke polish**~~ — done: render-time curve smoothing; *Fit* and *Follow*
   (keep the whole drawing framed — the laptop-in-a-call view).
 - ~~**Real PWA icons**~~ — done: `static/icons/icon.svg` + rendered PNGs.

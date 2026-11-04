@@ -850,8 +850,13 @@ sender. Whatever arrives on two paths (a link and the relay) Yjs dedupes.
   device connecting in that window is pulled too and a later one isn't.
   Receivers act once per `(client, n)` (`#readPulls` → `noteStore.pulled`):
   `NoteView` turns *Follow* off and calls `DrawingCanvas.showView`, which
-  glides to fit that rect and **waits for pen-up** if a stroke or gesture is
-  under way. The glide is an **arc** (`arc`), like something thrown (the
+  brings it to that rect and **waits for pen-up** if a stroke or gesture is
+  under way. **How** is the owner's choice, sent in the pull (`motion`; the
+  *Direct / Glide / Arc* switch under *Bring everyone here*, per device
+  `conote:pullMotion`, default *Direct*; presenting's slide pulls use it
+  too): `direct` jumps, `glide` eases log zoom and centre together in
+  `GLIDE_MS` (600 ms), `arc` is below; a pull without one (an older owner)
+  arcs. The arc (`arc`), like something thrown (the
   user asked for a parabola): the zoom — log of the view's width — is an
   exact parabola in time, out and back in, its top where the current view
   and the target are both in sight (`outerView`); the centre moves along
