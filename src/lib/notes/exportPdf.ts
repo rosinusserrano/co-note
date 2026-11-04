@@ -11,6 +11,13 @@
 // Characters Helvetica can't encode (outside Latin-1, roughly) become "?" in
 // the drawn text; conote.json keeps them as typed.
 //
+// *Glued* (an option): a page and the pages added beside it become one PDF
+// page, laid out as on screen but touching — pages of different sizes, but
+// everything where it was relative to its page. The original page goes in as
+// a form XObject (still vectors, not re-rendered), drawn through its pdf.js
+// viewport transform, so /Rotate and crop boxes come out as on screen. Its
+// conote.json describes the glued pages, so reopening it gives those.
+//
 // A note without pages exports its free ink on one page framing it. Free ink
 // in a note that has pages (drawn beside them) isn't on any page, so it isn't
 // exported.
@@ -41,6 +48,18 @@ function invert([a, b, c, d, e, f]: number[]): Mat {
 	return [d / det, -b / det, -c / det, a / det, (c * f - d * e) / det, (b * e - a * f) / det];
 }
 
+/** `outer` after `inner`: x ↦ outer(inner(x)). */
+function compose(o: number[], i: number[]): Mat {
+	return [
+		o[0] * i[0] + o[2] * i[1],
+		o[1] * i[0] + o[3] * i[1],
+		o[0] * i[2] + o[2] * i[3],
+		o[1] * i[2] + o[3] * i[3],
+		o[0] * i[4] + o[2] * i[5] + o[4],
+		o[1] * i[4] + o[3] * i[5] + o[5]
+	];
+}
+
 const MARGIN = 24;
 
 export async function exportPdf(
@@ -49,7 +68,8 @@ export async function exportPdf(
 	texts: TextBox[],
 	shapes: Shape[],
 	getFile: (hash: string) => Promise<Uint8Array>,
-	layout: PageLayout = 'vertical'
+	layout: PageLayout = 'vertical',
+	glued = false
 ): Promise<Uint8Array> {
 	const lib = await import('pdf-lib');
 	const out = await lib.PDFDocument.create();
@@ -163,7 +183,8 @@ export async function exportPdf(
 		copied.set(file, list);
 	}
 
-	for (const [index, p] of pages.entries()) {
+	/** A page as it is: the original copied, the ink on top. */
+	const plain = (p: PageEntry, index: number, extra: boolean) => {
 		let page: PDFPage;
 		let m: Mat;
 		if (p.pdf) {
@@ -174,10 +195,59 @@ export async function exportPdf(
 			m = [1, 0, 0, -1, 0, p.h]; // page-local is y-down from the top-left
 		}
 		drawInk(lib, page, onPage.get(p.id) ?? [], textOn.get(p.id) ?? [], shapesOn.get(p.id) ?? [], font, m, layer);
-		data.pages.push({ extra: p.extra });
+		data.pages.push({ extra });
 		for (const s of onPage.get(p.id) ?? []) keep(s, index);
 		for (const t of textOn.get(p.id) ?? []) keepText(t, index);
 		for (const sh of shapesOn.get(p.id) ?? []) keepShape(sh, index);
+	};
+
+	if (!glued) {
+		for (const [index, p] of pages.entries()) plain(p, index, p.extra);
+		return finish();
+	}
+
+	// Glued: rows of a page and the extras after it.
+	const rows: PageEntry[][] = [];
+	for (const p of pages) {
+		if (p.extra && rows.length > 0) rows[rows.length - 1].push(p);
+		else rows.push([p]);
+	}
+	const vertical = layout === 'vertical';
+	const { pushGraphicsState, popGraphicsState, concatTransformationMatrix, drawObject } = lib;
+	for (const [index, row] of rows.entries()) {
+		// Nothing beside it: the page as it is (links and all).
+		if (row.length === 1) {
+			plain(row[0], index, false);
+			continue;
+		}
+		// Beside each other as on screen: across the spine, aligned at its start.
+		const W = vertical ? row.reduce((t, p) => t + p.w, 0) : Math.max(...row.map((p) => p.w));
+		const H = vertical ? Math.max(...row.map((p) => p.h)) : row.reduce((t, p) => t + p.h, 0);
+		const page = out.addPage([W, H]);
+		data.pages.push({ extra: false });
+		let at = 0;
+		for (const p of row) {
+			const ox = vertical ? at : 0;
+			const oy = vertical ? 0 : at;
+			at += vertical ? p.w : p.h;
+			// Page-local (y down from its corner) → this PDF page.
+			const local: Mat = [1, 0, 0, -1, ox, H - oy];
+			if (p.pdf) {
+				const src = copied.get(p.pdf.file)!.shift()!;
+				const crop = src.getCropBox();
+				const form = await out.embedPage(
+					src,
+					{ left: crop.x, bottom: crop.y, right: crop.x + crop.width, top: crop.y + crop.height },
+					[1, 0, 0, 1, 0, 0]
+				);
+				const name = page.node.newXObject('ConotePage', form.ref);
+				page.pushOperators(pushGraphicsState(), concatTransformationMatrix(...compose(local, p.pdf.vt)), drawObject(name), popGraphicsState());
+			}
+			drawInk(lib, page, onPage.get(p.id) ?? [], textOn.get(p.id) ?? [], shapesOn.get(p.id) ?? [], font, local, layer);
+			for (const s of onPage.get(p.id) ?? []) keep(s, index, ox, oy);
+			for (const t of textOn.get(p.id) ?? []) keepText(t, index, ox, oy);
+			for (const sh of shapesOn.get(p.id) ?? []) keepShape(sh, index, ox, oy);
+		}
 	}
 	return finish();
 }

@@ -28,6 +28,8 @@
 	import { appUpdate } from '$lib/appUpdate.svelte';
 	import { Viewport, MAX_FIT_SCALE } from '$lib/notes/viewport.svelte';
 	import { PAGE_GAP } from '$lib/notes/pages';
+	import { takeOver } from '$lib/notes/pendingImport';
+	import { tabs } from '$lib/notes/tabs.svelte';
 	import { BRUSHES, MARKER_ALPHA } from '$lib/notes/ink';
 	import { TEXT_FONT, TEXT_SIZE } from '$lib/notes/text';
 	import type { Brush, ShapeKind } from '$lib/notes/model';
@@ -47,8 +49,10 @@
 	interface Props {
 		entry: NoteEntry;
 		onleave: () => void;
+		/** Switch to another of this device's notes (a tab). */
+		onopen: (id: string) => void;
 	}
-	let { entry, onleave }: Props = $props();
+	let { entry, onleave, onopen }: Props = $props();
 
 	// One viewport per session — this is what stays independent across devices.
 	// The parent remounts this component per note, so a note never inherits
@@ -213,7 +217,7 @@
 	const owner = $derived(isOwner(entry));
 
 	/** Which floating panel is open. One at a time; a tap elsewhere closes it. */
-	let pop = $state<'' | 'people' | 'share' | 'more' | 'ink' | 'keep' | 'zotero'>('');
+	let pop = $state<'' | 'people' | 'share' | 'more' | 'ink' | 'keep' | 'zotero' | 'tabs'>('');
 	/** The button that opened the panel, and where its bar sits: panels hang
 	 *  off it toward the middle of the screen, wherever the bar was put. */
 	let popFrom = $state<{ r: DOMRect; g: DOMRect; a: Anchor } | null>(null);
@@ -415,11 +419,24 @@
 
 	// --- Focus: nothing but the note, for devices that watch ---------------------
 
-	/** No chrome, no ink, the view following something. Observers start here. */
+	/** No chrome, no ink — the view stays where it is unless you pick something
+	 *  to follow. Observers start here, following the whole note. */
 	let focus = $state(untrack(() => entry.role !== 'edit'));
 	if (untrack(() => focus)) follow = 'drawing';
 
 	// --- Updates: reload into a new version at a quiet moment, and come back here ---
+
+	// A tab coming back: where it was (a reload's resume, below, wins).
+	(() => {
+		const v = tabs.view(untrack(() => entry.id));
+		if (!v) return;
+		viewport.scale = v.scale;
+		viewport.offset = { x: v.x, y: v.y };
+		focus = v.focus;
+		follow = null;
+		if (TOOLS.some((t) => t.id === v.tool)) tool = v.tool as Tool;
+		if (v.brush in inks) brush = v.brush as Ink;
+	})();
 
 	const RESUME_KEY = 'conote:resume';
 	type Resume = { id: string; at: number; scale: number; x: number; y: number; focus: boolean; follow: 'drawing' | null; tool: Tool; brush: Ink };
@@ -481,7 +498,6 @@
 		focus = on;
 		pop = '';
 		if (on) {
-			follow ??= 'drawing';
 			revealFocusBar();
 			const el = document.documentElement;
 			if (!document.fullscreenElement && el.requestFullscreen) {
@@ -601,14 +617,41 @@
 				});
 		}
 		if (focus) revealFocusBar();
+		// Made from a PDF dropped on the start page: bring it in.
+		const dropped = takeOver(entry.id);
+		if (dropped) void importPdf(dropped);
 		document.addEventListener('fullscreenchange', onFullscreenChange);
 		return () => {
 			document.removeEventListener('fullscreenchange', onFullscreenChange);
 			clearTimeout(focusBarTimer);
 			if ((fullscreenByFocus || fullscreenByPresent) && document.fullscreenElement) document.exitFullscreen().catch(() => {});
-			noteStore.disconnect();
+			tabs.remember(entry.id, {
+				scale: viewport.scale,
+				x: viewport.offset.x,
+				y: viewport.offset.y,
+				focus,
+				tool,
+				brush
+			});
+			// Switching tabs, the next note may already be connecting.
+			if (noteStore.id === entry.id) noteStore.disconnect();
 		};
 	});
+
+	// --- Tabs: the notes open on this device -------------------------------------
+
+	const openTabs = $derived(tabs.open.map((id) => noteIndex.get(id)!).filter(Boolean));
+	const otherTabs = $derived(openTabs.filter((t) => t.id !== entry.id));
+	/** Notes on this device not in a tab, most recent first (a few). */
+	const moreNotes = $derived(noteIndex.recent.filter((n) => !tabs.ids.includes(n.id)).slice(0, 8));
+
+	function closeTab(id: string) {
+		pop = '';
+		const next = tabs.close(id);
+		if (id !== entry.id) return;
+		if (next) onopen(next);
+		else onleave();
+	}
 
 	// --- Pulls: the owner brings everyone to their view --------------------------
 
@@ -624,6 +667,42 @@
 		clearTimeout(pullSentTimer);
 		pullSentTimer = setTimeout(() => (pullSent = false), 1500);
 	}
+
+	// --- Leading: the owner's view, followed by everyone until switched off ---
+
+	/** We (the owner) ask everyone to follow our view. */
+	let leading = $state(false);
+	function toggleLead() {
+		leading = !leading;
+		noteStore.setPresence({ lead: leading ? Date.now() : null });
+	}
+
+	/** Someone leading (only the owner can: the relay and the hub strip
+	 *  `lead` from everyone else), and the lead we last acted on. */
+	const leader = $derived(noteStore.presence.find((p) => p.lead !== null));
+	let leadSeen = '';
+	/** Brief "Following …" when a lead starts. */
+	let leadNotice = $state(false);
+	let leadNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+	$effect(() => {
+		const l = leader;
+		const key = l ? `${l.id}:${l.lead}` : '';
+		untrack(() => {
+			if (key === leadSeen) return;
+			const was = leadSeen;
+			leadSeen = key;
+			// A new lead: follow it (a hand pan or zoom lets go, as ever, and
+			// the notice offers to follow again).
+			if (l && !presenting) {
+				follow = l.id;
+				leadNotice = true;
+				clearTimeout(leadNoticeTimer);
+				leadNoticeTimer = setTimeout(() => (leadNotice = false), 3000);
+			}
+			// It ended: stay where it left us.
+			else if (!l && was && follow === Number(was.split(':')[0])) follow = null;
+		});
+	});
 
 	/** Shown briefly after we were pulled, so the jump isn't a mystery. */
 	let pulledBy = $state<{ label: string; color: string } | null>(null);
@@ -678,8 +757,8 @@
 		if (typeof id === 'number') {
 			const who = noteStore.presence.find((p) => p.id === id);
 			if (!who) {
-				// They left: fall back to the whole drawing in focus, else stay put.
-				untrack(() => (follow = focus ? 'drawing' : null));
+				// They left: stay put.
+				untrack(() => (follow = null));
 				return;
 			}
 			const v = who.view;
@@ -690,7 +769,7 @@
 	});
 
 	function followWho(id: Follow) {
-		follow = follow === id && !focus ? null : id;
+		follow = follow === id ? null : id;
 	}
 
 	const followed = $derived(typeof follow === 'number' ? noteStore.presence.find((p) => p.id === follow) : undefined);
@@ -781,12 +860,12 @@
 		else if (files.length > 0) pdfError = 'Only PDF files can be dropped here.';
 	}
 
-	async function exportPdf() {
+	async function exportPdf(glued = false) {
 		pop = '';
 		pdfBusy = 'export';
 		pdfError = '';
 		try {
-			const bytes = await noteStore.exportPdf();
+			const bytes = await noteStore.exportPdf(glued);
 			const url = URL.createObjectURL(new Blob([bytes.slice()], { type: 'application/pdf' }));
 			const a = document.createElement('a');
 			a.href = url;
@@ -1109,6 +1188,8 @@
 	// --- Bars: where each sits, merged or tucked away, per device --------------
 
 	const bars = new Bars();
+	/** Phones show the tabs as a count in the back button's place. */
+	const phoneTabs = $derived(bars.profile !== 'wide' && otherTabs.length > 0);
 	const narrowQuery = matchMedia('(max-width: 600px)');
 	bars.profile = narrowQuery.matches ? 'narrow' : 'wide';
 	onMount(() => {
@@ -1391,7 +1472,22 @@
 	{#snippet barBody(id: BarId, col: boolean)}
 		{#if id === 'title'}
 			<!-- Back, the note's name, who we are, whether we're live. -->
-			<button class="ibtn" onclick={onleave} title="All notes" aria-label="All notes"><Icon name="back" /></button>
+			{#if phoneTabs}
+				<!-- Phones with other tabs: the count takes the back button's place
+				     (its panel has "All notes"). -->
+				<button
+					class="ibtn tabsbtn"
+					class:on={pop === 'tabs'}
+					data-pop
+					onclick={(e) => toggle('tabs', e)}
+					title="Tabs: notes open on this device"
+					aria-label="Tabs"
+				>
+					<span class="tabcount">{otherTabs.length + 1}</span>
+				</button>
+			{:else}
+				<button class="ibtn" onclick={onleave} title="All notes" aria-label="All notes"><Icon name="back" /></button>
+			{/if}
 			<div class="ident">
 				<span class="name" title={entry.name}>{entry.name}</span>
 				<span class="kicker meta">
@@ -1401,6 +1497,33 @@
 					{#if entry.saved === false}<span class="sep">/</span><span class="unsaved" title="Not kept in an account: it ends when everyone leaves">unsaved</span>{/if}
 				</span>
 			</div>
+			<!-- Tabs: the other notes open here (wide screens), and the list of them. -->
+			{#if bars.profile === 'wide' && !col}
+				{#each otherTabs as t (t.id)}
+					<span class="tab">
+						<button class="tabname" onclick={() => onopen(t.id)} title={`Switch to ${t.name}`}>{t.name}</button>
+						<button class="tabx" onclick={() => closeTab(t.id)} title={`Close the ${t.name} tab`} aria-label={`Close ${t.name}`}>
+							<Icon name="x" size={12} />
+						</button>
+					</span>
+				{/each}
+			{/if}
+			{#if bars.profile === 'wide'}
+				<button
+					class="ibtn tabsbtn"
+					class:on={pop === 'tabs'}
+					data-pop
+					onclick={(e) => toggle('tabs', e)}
+					title="Tabs: notes open on this device"
+					aria-label="Tabs"
+				>
+					{#if otherTabs.length > 0 && col}
+						<span class="tabcount">{otherTabs.length + 1}</span>
+					{:else}
+						<Icon name="plus" size={16} />
+					{/if}
+				</button>
+			{/if}
 		{:else if id === 'people'}
 			<!-- People, share, bring everyone here, focus, more. -->
 			<button
@@ -1439,13 +1562,29 @@
 					<Icon name={pullSent ? 'check' : 'gather'} />
 				</button>
 			{/if}
+			{#if owner && bars.profile === 'wide'}
+				<!-- Phones have it in the people panel: no room up here. -->
+				<button
+					class="ibtn"
+					class:on={leading}
+					disabled={noteStore.access !== 'ok'}
+					onclick={toggleLead}
+					aria-pressed={leading}
+					title={leading
+						? 'Everyone follows you: their views go where yours goes. Tap to let them go.'
+						: 'Everyone follows me: keep everyone else\'s view on yours until you switch it off'}
+					aria-label="Everyone follows me"
+				>
+					<Icon name="radio" />
+				</button>
+			{/if}
 			{#if noteStore.pages.length > 0 && bars.profile === 'wide'}
 				<!-- Phones have it in the ⋯ menu: no room up here. -->
 				<button class="ibtn" onclick={startPresenting} title="Present (F5): the pages one at a time, full screen" aria-label="Present">
 					<Icon name="present" />
 				</button>
 			{/if}
-			<button class="ibtn" onclick={() => setFocus(true)} title="Focus mode (F): only the note, following along" aria-label="Focus mode">
+			<button class="ibtn" onclick={() => setFocus(true)} title="Focus mode (F): only the note, the bars out of the way" aria-label="Focus mode">
 				<Icon name="focus" />
 			</button>
 			<button class="ibtn" class:on={pop === 'more'} data-pop onclick={(e) => toggle('more', e)} title="More" aria-label="More">
@@ -1744,7 +1883,32 @@
 		{/if}
 
 		<!-- Panels from the top-right corner. -->
-		{#if pop === 'people'}
+		{#if pop === 'tabs'}
+			<div style={popStyle} class="pop corner-pop tabspop" data-pop transition:scale={{ start: 0.96, duration: 160 }}>
+				<div class="pophead">
+					<span class="serif">Tabs</span>
+					<span class="kicker">{otherTabs.length + 1} open</span>
+				</div>
+				<ul class="who">
+					{#each openTabs as t (t.id)}
+						<li class:here={t.id === entry.id}>
+							<button class="wl tabpick" disabled={t.id === entry.id} onclick={() => onopen(t.id)}>{t.name}</button>
+							{#if t.id === entry.id}<span class="kicker">here</span>{/if}
+							<button class="mini" onclick={() => closeTab(t.id)} aria-label={`Close ${t.name}`}>Close</button>
+						</li>
+					{/each}
+				</ul>
+				{#if moreNotes.length > 0}
+					<span class="kicker sect">Open in a new tab</span>
+					<div class="opennew">
+						{#each moreNotes as n (n.id)}
+							<button class="fchip" onclick={() => onopen(n.id)}>{n.name}</button>
+						{/each}
+					</div>
+				{/if}
+				<button class="mini" onclick={onleave}>All notes</button>
+			</div>
+		{:else if pop === 'people'}
 			<div style={popStyle} class="pop corner-pop" data-pop transition:scale={{ start: 0.96, duration: 160 }}>
 				<div class="pophead">
 					<span class="serif">On this note</span>
@@ -1780,6 +1944,11 @@
 						<Icon name={pullSent ? 'check' : 'gather'} size={18} />
 						{pullSent ? 'Sent' : 'Bring everyone here'}
 					</button>
+					<label class="switch">
+						<input type="checkbox" checked={leading} onchange={toggleLead} disabled={noteStore.access !== 'ok'} />
+						<span class="track"></span>
+						<span>Everyone follows me</span>
+					</label>
 				{/if}
 				<p class="fine kicker">{syncDetail}</p>
 			</div>
@@ -1940,9 +2109,19 @@
 						<Icon name="fileUp" size={18} /><span>Import PDF</span><span class="kicker">adds pages</span>
 					</button>
 				{/if}
-				<button class="item" disabled={pdfBusy !== ''} onclick={exportPdf}>
+				<button class="item" disabled={pdfBusy !== ''} onclick={() => exportPdf()}>
 					<Icon name="fileDown" size={18} /><span>Export PDF</span><span class="kicker">with ink</span>
 				</button>
+				{#if noteStore.pages.some((p) => p.extra)}
+					<button
+						class="item"
+						disabled={pdfBusy !== ''}
+						onclick={() => exportPdf(true)}
+						title="Each page and the pages added beside it come out as one page: sizes differ, but everything stays where it is"
+					>
+						<Icon name="fileDown" size={18} /><span>Export, added pages glued on</span><span class="kicker">one sheet each</span>
+					</button>
+				{/if}
 				{#if canEdit}
 					<button class="item" data-pop disabled={pdfBusy !== ''} onclick={openZotero}>
 						<Icon name="book" size={18} /><span>From Zotero</span><span class="kicker">open a paper</span>
@@ -2237,6 +2416,22 @@
 				<span><b>{pulledBy.label}</b> brought you to their view</span>
 			</div>
 		{/if}
+		{#if leader && !presenting && !pulledBy}
+			{#if follow === leader.id}
+				{#if leadNotice}
+					<div class="notice" role="status" transition:fly={{ y: -12, duration: 220 }}>
+						<span class="pip" style:background={leader.color}></span>
+						<span>Following <b>{leader.label || 'the owner'}</b> — moving the view lets go</span>
+					</div>
+				{/if}
+			{:else}
+				<div class="notice lead" role="status" transition:fly={{ y: -12, duration: 220 }}>
+					<span class="pip" style:background={leader.color}></span>
+					<span><b>{leader.label || 'The owner'}</b> is leading</span>
+					<button class="mini lime" onclick={() => (follow = leader.id)}>Follow</button>
+				</div>
+			{/if}
+		{/if}
 		{#if zoomNotice}
 			<div class="notice" role="status" transition:fly={{ y: -12, duration: 220 }}>
 				<span class="kicker lime">{zoomLock ? 'Zoom locked' : 'Zoom'}</span>
@@ -2273,7 +2468,7 @@
 			<div class="notice warn" transition:fly={{ y: -12, duration: 220 }}>
 				<span class="kicker">Ended</span>
 				<span>This note wasn't kept in an account, so it ended when everyone had left. You're looking at this device's last copy.</span>
-				<button class="mini" disabled={pdfBusy !== ''} onclick={exportPdf}>Export PDF</button>
+				<button class="mini" disabled={pdfBusy !== ''} onclick={() => exportPdf()}>Export PDF</button>
 				<button class="mini" onclick={forgetDeleted}>Forget it</button>
 			</div>
 		{:else if noteStore.access === 'gone'}
@@ -2758,7 +2953,105 @@
 		padding-right: 0.6rem;
 		gap: 0.35rem;
 		min-width: 48px;
-		max-width: 24rem;
+		max-width: 46rem;
+	}
+	/* Tabs: the other notes open here, beside the name. */
+	.tab {
+		display: inline-flex;
+		align-items: center;
+		flex: 0 1 auto;
+		min-width: 3.2rem;
+		max-width: 10rem;
+		height: 32px;
+		border-radius: 999px;
+		background: rgb(255 255 255 / 0.07);
+	}
+	.tab:first-of-type {
+		margin-left: 0.3rem;
+	}
+	.tabname {
+		flex: 1;
+		min-width: 0;
+		height: 100%;
+		padding: 0 0.15rem 0 0.75rem;
+		border: none;
+		background: none;
+		color: inherit;
+		font: italic 1.02rem var(--f-serif);
+		opacity: 0.7;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.tab:hover .tabname {
+		opacity: 1;
+	}
+	.tabx {
+		flex: none;
+		display: grid;
+		place-items: center;
+		width: 22px;
+		height: 22px;
+		margin-right: 5px;
+		border: none;
+		border-radius: 50%;
+		background: none;
+		color: inherit;
+		opacity: 0.45;
+		cursor: pointer;
+	}
+	.tabx:hover {
+		opacity: 1;
+		background: var(--ink-3);
+	}
+	.tabsbtn {
+		flex: none;
+	}
+	.tabcount {
+		font: 500 0.8rem var(--f-mono);
+	}
+	.tabpick {
+		flex: 1;
+		min-width: 0;
+		padding: 0;
+		border: none;
+		background: none;
+		color: inherit;
+		font: italic 1.1rem var(--f-serif);
+		text-align: left;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.tabpick:disabled {
+		opacity: 1;
+		cursor: default;
+	}
+	.who li.here .tabpick {
+		font-weight: 600;
+	}
+	.opennew {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem;
+	}
+	.opennew .fchip {
+		max-width: 100%;
+		padding: 0.3rem 0.75rem;
+		border: 1px solid var(--rule);
+		border-radius: 999px;
+		background: var(--chalk);
+		color: var(--ink);
+		font: 500 0.85rem var(--f-sans);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.tabspop .sect {
+		padding: 0.2rem 0 0;
 	}
 	.ident {
 		display: flex;

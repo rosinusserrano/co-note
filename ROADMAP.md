@@ -32,21 +32,19 @@ Gained: LAN-latency strokes between devices in the same room, and strokes keep
 flowing between them if the server link drops. **Not** gained yet: less server
 traffic — see below.
 
-### Next: actually take strokes off the server
+### Done: strokes and presence off the server
 
-Today the relay still fans every stroke out to every device, direct link or not.
-Options, roughly in order of effort:
+Devices with a direct link go *quiet* on the relay: they send and get nothing
+there but keepalives. Strokes, cursors, live strokes, lasers, pulls and leads
+travel over the star; the hub (the owner's device when it's on) checks
+presence fields the way the relay does. Only the hub uploads, in batches every
+5 s (and when hidden or closing), so the server keeps the note for whoever
+joins next. The relay still carries everything for a device that can't link
+(and the hub relays live while one is there). See CLAUDE.md "Direct links".
 
-1. **Relay skips devices the hub reaches.** Clients report "direct link open"
-   over matchmaking; the relay stops sending doc updates to them (still accepts
-   their uploads, still stores). Cuts server *egress* to ~one copy per stroke.
-   Risk: a link that dies silently loses strokes until the client notices and
-   tells the relay — needs a resync on link loss (SyncStep1 over the relay).
-2. **Only the hub uploads.** Other devices stop sending to the relay while their
-   link is up. Cuts ingress too, but the server copy now depends on the hub.
-3. **No server copy at all** while someone is online, upload on demand. Closest
-   to "notes belong to the user"; makes "join when nobody's online" depend on
-   a device being online. Still an open product question.
+Open: a hub whose relay is down saves nothing until it's back (the others
+still have everything, and the next device to go live uploads what's
+missing); 5 s of the latest ink exists only on devices if the hub dies.
 
 ### Done: PDFs
 
@@ -73,17 +71,16 @@ sessions; more brushes (pencil texture, dashed). (Keyboard shortcuts: done.)
 full-bleed canvas with floating chrome that steps back while drawing, panels for
 rarely used actions, keyboard shortcuts for tools, and a focus mode for watching
 devices that can follow the whole note or one device's view. Open: remembering
-brush settings per device; a dark variant of the chrome for dim rooms; letting
-the owner make everyone *follow* (not just a one-shot pull).
+brush settings per device; a dark variant of the chrome for dim rooms. (The
+owner making everyone *follow*, *Everyone follows me*, is done.)
 
 ### Other candidates
 
 - ~~**Live in-progress strokes.**~~ — done, over awareness after all: each
   update carries only the points since the last one (`LiveChunk`, every 30 ms),
   so the whole-state nature doesn't make it grow; ~5 KB/s while drawing with a
-  mouse, more with a 240 Hz pen. Possible follow-up: send the chunks over the
-  direct link too (lower latency; awareness stays the fallback).
-- **Presence over the direct link** — cursors still take the server round trip.
+  mouse, more with a 240 Hz pen. They travel over the direct links now.
+- ~~**Presence over the direct link**~~ — done, see above.
 - **Stronger passcodes.** Weak ones are refused and joins have a per-name
   budget (20 failures/hour), but a 4-digit PIN still falls to patient guessing
   (~480 tries/day). Raising the minimum is a UX call.
@@ -228,8 +225,9 @@ to find each other. Once they've found each other, the actual drawing data flows
   sees; presence only, nothing stored.
 - ~~**Bring everyone here**~~ — done: the owner pulls every other device onto
   their view (one-shot; the relay only lets the owner's connection send it).
-  Possible follow-up: a sticky *Lead* mode where the others keep following
-  until they move by hand.
+  Its sticky sibling *Everyone follows me* is done too: the others keep
+  following the owner's view until they move by hand (a notice offers to
+  follow again) or the owner switches it off.
 - ~~**Stroke polish**~~ — done: render-time curve smoothing; *Fit* and *Follow*
   (keep the whole drawing framed — the laptop-in-a-call view).
 - ~~**Real PWA icons**~~ — done: `static/icons/icon.svg` + rendered PNGs.

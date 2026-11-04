@@ -144,6 +144,10 @@ android {
 
         resValue "string", "generatorApp", twaManifest.generatorApp
 
+        // "Open with conote" for PDFs (FileHandlingActivity0 in AndroidManifest.xml):
+        // Chrome opens this URL and hands the file to the page's launchQueue.
+        resValue "string", "fileHandlingActionUrl0", "https://conote.sniggles.de/?open=pdf"
+
         resValue "string", "fallbackType", twaManifest.fallbackType
 
         resValue "bool", "enableSiteSettingsShortcut", twaManifest.enableSiteSettingsShortcut

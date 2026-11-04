@@ -40,7 +40,12 @@
   "additionalTrustedOrigins": [],
   "retainedBundles": [],
   "protocolHandlers": [],
-  "fileHandlers": [],
+  "fileHandlers": [
+    {
+      "actionUrl": "https://conote.sniggles.de/?open=pdf",
+      "mimeTypes": ["application/pdf"]
+    }
+  ],
   "launchHandlerClientMode": "",
   "displayOverride": [],
   "appVersion": "1.0.0"

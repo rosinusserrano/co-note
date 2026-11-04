@@ -37,7 +37,15 @@ export interface OwnerSession extends NoteSession {
 	ownerProof: string;
 }
 
-export class ApiError extends Error {}
+export class ApiError extends Error {
+	/** The HTTP status, 0 if the server wasn't reached. */
+	constructor(
+		message: string,
+		readonly status = 0
+	) {
+		super(message);
+	}
+}
 
 /** Same-origin `/api` behind Caddy; the server's own port when the page comes
  *  from a dev port — mirrors serverUrl() in noteStore. */
@@ -68,7 +76,7 @@ async function post<T>(path: string, body: object): Promise<T> {
 	}
 	const data = await res.json().catch(() => ({}));
 	if (res.status === 401) throw new SignedOutError(data.error ?? 'Please sign in again.');
-	if (!res.ok) throw new ApiError(data.error ?? `Server error (${res.status}).`);
+	if (!res.ok) throw new ApiError(data.error ?? `Server error (${res.status}).`, res.status);
 	return data as T;
 }
 

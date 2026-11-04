@@ -12,14 +12,21 @@
 // connection may ask for state (SyncStep1) but every write it sends is dropped.
 //
 // The owner's device also presents `&owner=<proof>`. Its connection is the only
-// one whose presence may carry `pull` (bring everyone to my view): the relay
-// strips that field from everyone else's awareness, so a pull that reaches a
-// device came from the owner. Likewise `laser` (the laser pointer) and `live`
-// (a stroke in progress, previewed until the real one lands) are stripped
-// from observers: they can't draw, so they can't seem to either.
+// one whose presence may carry `pull` (bring everyone to my view) or `lead`
+// (everyone follows me): the relay strips those from everyone else's
+// awareness, so one that reaches a device came from the owner. Likewise
+// `laser` (the laser pointer) and `live` (a stroke in progress, previewed
+// until the real one lands) are stripped from observers: they can't draw, so
+// they can't seem to either.
 //
 // The same token also opens /signal/<noteId>: matchmaking for direct WebRTC
-// links between the note's devices (see "P2P matchmaking" below).
+// links between the note's devices (see "P2P matchmaking" below). Devices
+// with a direct link talk over it, not through here: they tell the relay
+// they're QUIET, and it stops sending them anything but keepalives. The hub
+// keeps uploading, so the doc here stays current; the relay tells it how many
+// connections still LISTEN (devices without a direct link), and while that's
+// none it uploads in batches and keeps its presence to itself. See
+// src/lib/notes/relayMode.ts.
 //
 // Run:  npm run sync   (listens on SYNC_PORT, default 5182; data in CONOTE_DATA, default ./data)
 
@@ -41,6 +48,10 @@ const HOST = process.env.SYNC_HOST || undefined;
 
 const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;
+// Not y-websocket's: client → server "I'm quiet" (1) / "listening again" (0),
+// and server → client "this many other connections listen".
+const MESSAGE_QUIET = 100;
+const MESSAGE_LISTENERS = 101;
 
 const WS_OPEN = 1;
 
@@ -73,13 +84,14 @@ function getRoom(id) {
 	/** @type {Map<any, Set<number>>} */
 	const conns = new Map();
 
-	// Broadcast document updates to every connected client, and schedule a save.
-	doc.on('update', (update) => {
+	// Pass document updates on to every listening client but the sender, and
+	// schedule a save.
+	doc.on('update', (update, origin) => {
 		const enc = encoding.createEncoder();
 		encoding.writeVarUint(enc, MESSAGE_SYNC);
 		syncProtocol.writeUpdate(enc, update);
 		const msg = encoding.toUint8Array(enc);
-		conns.forEach((_ids, ws) => send(ws, msg));
+		conns.forEach((_ids, ws) => ws !== origin && !ws.quiet && send(ws, msg));
 		clearTimeout(room.saveTimer);
 		room.saveTimer = setTimeout(() => saveRoom(id, room), SAVE_DELAY_MS);
 	});
@@ -97,12 +109,43 @@ function getRoom(id) {
 		encoding.writeVarUint(enc, MESSAGE_AWARENESS);
 		encoding.writeVarUint8Array(enc, awarenessProtocol.encodeAwarenessUpdate(awareness, changed));
 		const msg = encoding.toUint8Array(enc);
-		conns.forEach((_ids, ws) => send(ws, msg));
+		conns.forEach((_ids, ws) => ws !== origin && !ws.quiet && send(ws, msg));
 	});
 
 	room = { doc, awareness, conns, saveTimer: null };
 	rooms.set(id, room);
 	return room;
+}
+
+/** Tell each listening connection how many others listen (when it changed):
+ *  the hub relays live while that's more than none. */
+function tellListeners(room) {
+	const listening = [...room.conns.keys()].filter((ws) => !ws.quiet);
+	for (const ws of listening) {
+		const n = listening.length - 1;
+		if (ws.toldListeners === n) continue;
+		ws.toldListeners = n;
+		const enc = encoding.createEncoder();
+		encoding.writeVarUint(enc, MESSAGE_LISTENERS);
+		encoding.writeVarUint(enc, n);
+		send(ws, encoding.toUint8Array(enc));
+	}
+}
+
+/** Everything a (newly) listening connection needs: our state vector, so it
+ *  sends what we lack (and asks for what it lacks), and everyone's presence. */
+function greet(ws, room) {
+	const enc = encoding.createEncoder();
+	encoding.writeVarUint(enc, MESSAGE_SYNC);
+	syncProtocol.writeSyncStep1(enc, room.doc);
+	send(ws, encoding.toUint8Array(enc));
+	const states = room.awareness.getStates();
+	if (states.size > 0) {
+		const enc = encoding.createEncoder();
+		encoding.writeVarUint(enc, MESSAGE_AWARENESS);
+		encoding.writeVarUint8Array(enc, awarenessProtocol.encodeAwarenessUpdate(room.awareness, [...states.keys()]));
+		send(ws, encoding.toUint8Array(enc));
+	}
 }
 
 function saveRoom(id, room) {
@@ -158,23 +201,29 @@ function closeConnections(id, roles, code) {
 // blips). This part only introduces them: it relays SDP/ICE and never sees
 // stroke data on that path.
 //
-// Topology is a star around one hub, the longest-connected editor. Every other
-// device links to the hub and to nothing else; this server only forwards
-// signals that have the hub at one end, so no other link can form. The hub
-// drops writes from observers exactly like the relay does, and it learns each
-// device's role from here — from the verified token, never from the device.
+// Topology is a star around one hub: the owner's device when it's here, else
+// the longest-connected editor. Every other device links to the hub and to
+// nothing else; this server only forwards signals that have the hub at one
+// end, so no other link can form. The hub drops writes from observers exactly
+// like the relay does, and strips presence fields the same way; it learns
+// each device's role (and which is the owner's) from here — from the verified
+// token and owner proof, never from the device. Everyone is told whether the
+// hub is the owner's: only then do they take `pull` / `lead` from it.
 // It is the v1 broadcast star, with roles now coming from note tokens.
 
-/** @type {Map<string, Map<string, { ws: any, role: 'edit' | 'view' }>>} note id → peer id → peer */
+/** @type {Map<string, Map<string, { ws: any, role: 'edit' | 'view', owner: boolean }>>} note id → peer id → peer */
 const signalRooms = new Map();
 const MAX_SIGNAL_PEERS = 32;
 const MAX_SIGNAL_MESSAGE = 64 * 1024;
 
 const sendJson = (ws, obj) => send(ws, JSON.stringify(obj));
 
-/** The hub is the first editor still connected (Maps keep insertion order),
- *  so it only changes when that device leaves. */
+/** The hub is the owner's device if one is connected, else the first editor
+ *  still connected (Maps keep insertion order), so it only changes when that
+ *  device leaves or the owner arrives. The owner is the one whose copy should
+ *  be the server's. */
 function hubOf(room) {
+	for (const [pid, p] of room) if (p.owner) return pid;
 	for (const [pid, p] of room) if (p.role === 'edit') return pid;
 	return null;
 }
@@ -185,17 +234,18 @@ function announce(id) {
 	const room = signalRooms.get(id);
 	if (!room) return;
 	const hub = hubOf(room);
+	const hubOwner = hub !== null && room.get(hub).owner;
 	for (const [pid, p] of room) {
 		if (pid === hub) {
-			const peers = [...room].filter(([q]) => q !== hub).map(([q, r]) => ({ id: q, role: r.role }));
-			sendJson(p.ws, { t: 'hub', hub, peers });
+			const peers = [...room].filter(([q]) => q !== hub).map(([q, r]) => ({ id: q, role: r.role, owner: r.owner }));
+			sendJson(p.ws, { t: 'hub', hub, hubOwner, peers });
 		} else {
-			sendJson(p.ws, { t: 'hub', hub });
+			sendJson(p.ws, { t: 'hub', hub, hubOwner });
 		}
 	}
 }
 
-function onSignalConnection(ws, id, role) {
+function onSignalConnection(ws, id, role, owner) {
 	let room = signalRooms.get(id);
 	if (!room) signalRooms.set(id, (room = new Map()));
 	if (room.size >= MAX_SIGNAL_PEERS) {
@@ -203,7 +253,7 @@ function onSignalConnection(ws, id, role) {
 		return;
 	}
 	const peerId = randomUUID();
-	room.set(peerId, { ws, role });
+	room.set(peerId, { ws, role, owner });
 	sendJson(ws, { t: 'welcome', id: peerId, role });
 	announce(id);
 
@@ -509,7 +559,12 @@ async function handleHttp(req, res) {
 
 	const [bucket, handler] = route;
 	const ip = clientIp(req);
-	const busy = (kind, key) => overLimit(kind, key) && reply(429, { error: 'Too many attempts. Try again later.' });
+	// Over budget: answer 429 and say so, so the request goes no further.
+	const busy = (kind, key) => {
+		if (!overLimit(kind, key)) return false;
+		reply(429, { error: 'Too many attempts. Try again later.' });
+		return true;
+	};
 	if (busy(bucket, ip)) return;
 	let name = null; // join / login: the per-name budget's key
 	const nameBucket = bucket === 'join' ? 'joinName' : bucket === 'login' ? 'loginName' : null;
@@ -598,9 +653,10 @@ server.on('upgrade', (req, socket, head) => {
 			ws.close(code, 'no access');
 			return;
 		}
-		if (signal) onSignalConnection(ws, id, access.role);
+		const owner = registry.verifyOwnerProof(id, url.searchParams.get('owner'));
+		if (signal) onSignalConnection(ws, id, access.role, owner && access.role === 'edit');
 		else {
-			ws.owner = registry.verifyOwnerProof(id, url.searchParams.get('owner'));
+			ws.owner = owner;
 			wss.emit('connection', ws, id, access.role);
 		}
 	});
@@ -610,28 +666,14 @@ wss.on('connection', (ws, id, role) => {
 	ws.binaryType = 'arraybuffer';
 	lastSeen.set(id, Date.now());
 	ws.role = role;
+	ws.quiet = false;
 	const room = getRoom(id);
 	room.conns.set(ws, new Set());
 
-	// Kick off sync: send our state vector (SyncStep1) so the client replies with
-	// whatever we're missing.
-	{
-		const enc = encoding.createEncoder();
-		encoding.writeVarUint(enc, MESSAGE_SYNC);
-		syncProtocol.writeSyncStep1(enc, room.doc);
-		send(ws, encoding.toUint8Array(enc));
-	}
-	// Send existing awareness states so the newcomer sees current peers.
-	const states = room.awareness.getStates();
-	if (states.size > 0) {
-		const enc = encoding.createEncoder();
-		encoding.writeVarUint(enc, MESSAGE_AWARENESS);
-		encoding.writeVarUint8Array(
-			enc,
-			awarenessProtocol.encodeAwarenessUpdate(room.awareness, [...states.keys()])
-		);
-		send(ws, encoding.toUint8Array(enc));
-	}
+	// Kick off sync (the client replies with whatever we're missing), and show
+	// the newcomer who's here.
+	greet(ws, room);
+	tellListeners(room);
 
 	ws.on('message', (data) => {
 		try {
@@ -651,10 +693,17 @@ wss.on('connection', (ws, id, role) => {
 			} else if (type === MESSAGE_AWARENESS) {
 				let update = decoding.readVarUint8Array(decoder);
 				const banned = [];
-				if (!ws.owner) banned.push('pull');
+				if (!ws.owner) banned.push('pull', 'lead');
 				if (role !== 'edit') banned.push('laser', 'live');
 				if (banned.length > 0) update = stripFields(update, banned);
 				awarenessProtocol.applyAwarenessUpdate(room.awareness, update, ws);
+			} else if (type === MESSAGE_QUIET) {
+				const quiet = decoding.readVarUint(decoder) === 1;
+				if (quiet === ws.quiet) return;
+				ws.quiet = quiet;
+				ws.toldListeners = undefined;
+				if (!quiet) greet(ws, room); // catch up on what it missed
+				tellListeners(room);
 			}
 		} catch (e) {
 			// A malformed message must cost the sender its connection, not the room.
@@ -679,7 +728,7 @@ wss.on('connection', (ws, id, role) => {
 			if (room.saveTimer) saveRoom(id, room);
 			room.doc.destroy();
 			rooms.delete(id);
-		}
+		} else tellListeners(room);
 	};
 	ws.on('close', cleanup);
 	ws.on('error', cleanup);
@@ -700,7 +749,23 @@ const heartbeat = setInterval(() => {
 	});
 }, 30000);
 
-wss.on('close', () => clearInterval(heartbeat));
+// y-websocket reconnects after 30 s without a message, and a quiet connection
+// (or one alone on its note) may get none: an empty awareness update every
+// 15 s does nothing but count as one.
+const KEEPALIVE = (() => {
+	const enc = encoding.createEncoder();
+	encoding.writeVarUint(enc, MESSAGE_AWARENESS);
+	encoding.writeVarUint8Array(enc, new Uint8Array([0]));
+	return encoding.toUint8Array(enc);
+})();
+const keepalive = setInterval(() => {
+	for (const room of rooms.values()) for (const ws of room.conns.keys()) send(ws, KEEPALIVE);
+}, 15000);
+
+wss.on('close', () => {
+	clearInterval(heartbeat);
+	clearInterval(keepalive);
+});
 
 // Flush pending saves on shutdown (systemctl restart sends SIGTERM).
 for (const sig of ['SIGTERM', 'SIGINT']) {

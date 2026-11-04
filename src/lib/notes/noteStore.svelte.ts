@@ -12,10 +12,12 @@
 //                              the page layout. PDF files themselves live on the
 //                              note server and in this device's file cache.
 //   - IndexeddbPersistence     local-first: survives reloads, works offline
-//   - WebsocketProvider        relay through the note server (server/sync-server.js),
-//                              which also carries presence (awareness)
+//   - WebsocketProvider        the note server (server/sync-server.js): loads and
+//                              keeps the note, and relays for devices without a
+//                              direct link (relayMode.ts decides how much)
 //   - P2PLinks                 direct WebRTC links between the note's devices,
-//                              introduced by the same server (p2p.ts)
+//                              introduced by the same server (p2p.ts): strokes
+//                              and presence (awareness) go this way
 //   - Y.UndoManager            collaboration-aware undo/redo (local edits only)
 //
 // INVARIANT (unchanged from before): this holds only *shared* content. Viewport
@@ -34,6 +36,7 @@ import { WebsocketProvider } from 'y-websocket';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import { uid, type Brush, type PageEntry, type PageLayout, type Shape, type Stroke, type TextBox } from './model';
 import { P2PLinks } from './p2p';
+import { RelayMode, type RelayModeName } from './relayMode';
 import { layoutPages, contentBounds, PAGE_GAP, type PlacedPage } from './pages';
 import { getCachedFile, cacheFile, dropCachedFiles } from './files';
 import { uploadFile, downloadFile } from './api';
@@ -80,6 +83,10 @@ export interface Presence {
 	/** Laser pointer on: `cursor` is drawing a fading trail. Editors only —
 	 *  the relay strips it from observers. */
 	laser: boolean;
+	/** The owner asks everyone to follow its view (*Everyone follows me*),
+	 *  as long as this is set; new for each time it's switched on. Owner only
+	 *  (stripped like `pull`). */
+	lead: number | null;
 }
 
 /** The owner asked everyone to look at `view` (world rect). `n` is new for
@@ -96,7 +103,7 @@ export interface Pull {
 const PULL_TTL_MS = 4000;
 
 /** What this session publishes about itself (see Presence). */
-export type LocalPresence = Partial<Pick<Presence, 'cursor' | 'view' | 'laser'>> & {
+export type LocalPresence = Partial<Pick<Presence, 'cursor' | 'view' | 'laser' | 'lead'>> & {
 	pull?: { n: number; view: Rect };
 	live?: LiveChunk | null;
 };
@@ -191,8 +198,9 @@ export function destroyNoteData(id: string): Promise<void> {
 const wsParams = (token: string, owner?: string): Record<string, string> => (owner ? { token, owner } : { token });
 
 /** The note server's matchmaking socket for direct links (sync-server.js). */
-const p2pUrl = (id: string, token: string) =>
-	`${syncUrl()}/signal/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}`;
+const p2pUrl = (id: string, token: string, owner?: string) =>
+	`${syncUrl()}/signal/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}` +
+	(owner ? `&owner=${encodeURIComponent(owner)}` : '');
 
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
@@ -215,7 +223,8 @@ function readPresence(states: Map<number, Record<string, any>>, self: number): P
 			label: typeof st.label === 'string' ? st.label.slice(0, 40) : '',
 			cursor: c && finite(c.x) && finite(c.y) ? { x: c.x, y: c.y } : null,
 			view: readRect(st.view),
-			laser: st.laser === true
+			laser: st.laser === true,
+			lead: Number.isSafeInteger(st.lead) && st.lead > 0 ? st.lead : null
 		});
 	}
 	return out;
@@ -249,6 +258,8 @@ class NoteStore {
 	direct = $state(0);
 	/** Whether this device is the hub the others link to directly. */
 	hub = $state(false);
+	/** How this device uses the relay (see relayMode.ts). */
+	relay = $state<RelayModeName>('live');
 	/** The note's pages, placed in the world. Updated with `revision`. */
 	pages = $state.raw<PlacedPage[]>([]);
 	/** Which way pages run (shared by everyone on the note). */
@@ -265,6 +276,7 @@ class NoteStore {
 	#ws: WebsocketProvider | null = null;
 	#idb: IndexeddbPersistence | null = null;
 	#p2p: P2PLinks | null = null;
+	#relay: RelayMode | null = null;
 	/** Pulls: ours (counter and the timer that withdraws it), and the last one
 	 *  acted on per other session. */
 	#pullSeq = 0;
@@ -368,6 +380,9 @@ class NoteStore {
 		// local IndexedDB database.
 		const ws = new WebsocketProvider(syncUrl(), id, doc, { params: wsParams(token, opts.owner) });
 		this.#ws = ws;
+		this.#relay = new RelayMode(ws, () => {
+			if (current()) this.#pickRelayMode();
+		});
 
 		// Give this session an awareness field before the socket opens.
 		//
@@ -421,6 +436,7 @@ class NoteStore {
 				this.#p2p = null;
 				this.direct = 0;
 				this.hub = false;
+				this.#pickRelayMode();
 				this.status = 'offline';
 			}
 		});
@@ -440,7 +456,8 @@ class NoteStore {
 	#startP2P(id: string, token: string) {
 		const doc = this.#doc!;
 		const ws = this.#ws!;
-		this.#p2p = new P2PLinks(doc, p2pUrl(id, token), {
+		this.#p2p = new P2PLinks(doc, p2pUrl(id, token, ws.params.owner), {
+			awareness: ws.awareness,
 			// Updates from the hub are applied as if the relay had delivered them:
 			// the provider won't upload them again, and undo ignores them.
 			remoteOrigin: () => ws,
@@ -448,8 +465,20 @@ class NoteStore {
 				if (this.#doc !== doc) return;
 				this.direct = s.links;
 				this.hub = s.hub;
+				this.#pickRelayMode();
 			}
 		});
+	}
+
+	/** Linked to a hub that passes presence too: quiet on the relay. The hub: saves, and relays live
+	 *  only while someone without a direct link is on the relay. Anyone else
+	 *  (no link yet, or none possible): the relay as before. */
+	#pickRelayMode() {
+		const relay = this.#relay;
+		if (!relay) return;
+		const s = this.#p2p?.state;
+		relay.set(s?.carried ? 'quiet' : s?.hub && relay.listeners === 0 ? 'saver' : 'live');
+		this.relay = relay.mode;
 	}
 
 	/** Reconnect the open note with a new token (after the owner changed the
@@ -462,7 +491,7 @@ class NoteStore {
 		this.access = 'ok';
 		this.status = 'connecting';
 		this.#ws.connect();
-		if (this.#p2p) this.#p2p.setUrl(p2pUrl(this.id, token));
+		if (this.#p2p) this.#p2p.setUrl(p2pUrl(this.id, token, this.#ws.params.owner));
 		else if (p2pEnabled()) this.#startP2P(this.id, token);
 	}
 
@@ -593,6 +622,8 @@ class NoteStore {
 		// Providers first, then the doc they observe.
 		this.#p2p?.destroy();
 		this.#p2p = null;
+		this.#relay?.destroy(); // the hub's last batch goes up first
+		this.#relay = null;
 		this.#ws?.destroy();
 		this.#idb?.destroy();
 		this.#undo?.destroy();
@@ -631,6 +662,7 @@ class NoteStore {
 		this.presence = [];
 		this.direct = 0;
 		this.hub = false;
+		this.relay = 'live';
 		this.pages = [];
 		this.zotero = null;
 		this.name = '';
@@ -881,9 +913,10 @@ class NoteStore {
 	}
 
 	/** The note as a PDF (see exportPdf.ts). */
-	async exportPdf(): Promise<Uint8Array> {
+	/** `glued`: each page and the pages added beside it as one PDF page. */
+	async exportPdf(glued = false): Promise<Uint8Array> {
 		const { exportPdf } = await import('./exportPdf');
-		return exportPdf(this.#pages?.toArray() ?? [], this.#cache, this.#textCache, this.#shapeCache, (h) => this.fileBytes(h), this.layout);
+		return exportPdf(this.#pages?.toArray() ?? [], this.#cache, this.#textCache, this.#shapeCache, (h) => this.fileBytes(h), this.layout, glued);
 	}
 
 	#refresh() {

@@ -259,10 +259,36 @@ chosen device.
   zooms, kept over a reload; others' cursors off by default and remembered
   when on; saved inks: one rail button, unfolds a strip beside the rail
   without growing it, picks the ink, stays open over a reload.
+  Direct round (30 + 9 + 7 + 14 checks, plus regress, bars, phone, present,
+  presets and the earlier suites re-run): owner, editor and observer on a
+  note — the owner is the hub, the others go *quiet* on the relay and the
+  owner *saves*; an editor's stroke reaches everyone (the observer sees it
+  live) with **0 relay frames** sent by the editor and 0 received by
+  editor and observer while drawing, the owner's one batch within 5 s, the
+  server's copy on disk has it; cursors cross the links; an observer's
+  forged laser / live stroke / lead and an editor's forged lead are dropped
+  by the hub; *Everyone follows me* moves editor and observer to the
+  owner's view, a pan lets go with a *Follow* notice that brings it back,
+  off ends it; focus mode keeps the zoom; a device that can't link (no ICE
+  candidates) stays on the relay, the hub relays live while it's there,
+  strokes cross both ways, back to saving once it leaves; the owner leaving
+  hands the hub to the editor, whose lead is ignored (hub not the owner).
+  Glued export: page + blank beside it and a /Rotate 90 page + blank → 2
+  pages of the summed sizes, each part pixel-identical (pdf.js) to the plain
+  export's page, reopens as 2 pages with all 8 strokes and the text. PDF
+  drop on the start page: a folder chip lights and names the folder, the
+  drop makes a private note named after the file in it with the PDF
+  imported, the same file again gets `-2`; signed out the New note form
+  opens with the name and the PDF waiting, which comes in on create. Tabs:
+  another note opened shows the first as a tab, switching brings back its
+  zoom and stroke, the panel lists, closes and opens tabs, closing the
+  current one shows its neighbour, kept over a reload; phones 320–390 px
+  show a count in the back button's place without crowding the corner.
 - **Not yet verified on real hardware:** on-device stylus feel and the Android
   install path over HTTPS.
-- **Next:** see `ROADMAP.md`. Direct links run *alongside* the relay; the relay
-  still carries (and stores) every stroke, so server traffic isn't reduced yet.
+- **Next:** see `ROADMAP.md`. Devices on a note talk over direct links; the
+  server keeps the note (the hub's batched saves) and relays only for devices
+  that can't link directly.
 
 ## Stack
 
@@ -298,8 +324,9 @@ chosen device.
     `_app/immutable/`), so a lazy load (pdf.js, export) never 404s.
   `__BUILD_ID__` (build time, UTC) shows in the ⋯ menu and the start page.
 - **Sync**: Yjs CRDT — `yjs` + `y-indexeddb` (local-first) + `y-websocket`
-  (client) against `server/sync-server.js` (relay + note registry API). `ws`,
-  `y-protocols` and `lib0` are server-side imports (never bundled into the client).
+  (client) against `server/sync-server.js` (relay + note registry API). `ws` is
+  server-only; `y-protocols` and `lib0` ride along with y-websocket in the client
+  too, and `p2p.ts` / `relayMode.ts` import them directly (one yjs in the bundle).
 
 Note: the `sv` / `create-svelte` CLI needs Node ≥20.12; this repo was scaffolded
 by hand and runs on the local Node 20.2. Keep Vite pinned to ^5 (Vite 7 wants
@@ -358,8 +385,8 @@ is run from.
 A **Trusted Web Activity** generated with Bubblewrap (`@bubblewrap/core`,
 config in `android/twa-manifest.json`): a thin shell that opens
 https://conote.sniggles.de in Chrome without browser UI. It contains no copy of
-the app, so `publish-web.sh` updates it too; rebuild only for name, icon or
-colour changes (edit `android/app/build.gradle` / regenerate). CI builds it on
+the app, so `publish-web.sh` updates it too; rebuild only for name, icon,
+colour or file-handler (*Open with* for PDFs) changes (edit `android/app/build.gradle` / regenerate). CI builds it on
 every push to `main` (artifact `conote-apk`; tags `v*` attach it to a release),
 next to a `npm run check` + `npm run build` job. `versionCode` = the CI run
 number, so each build installs over the previous one.
@@ -625,11 +652,34 @@ must be preserved:
 
 ### Direct links / P2P (`p2p.ts` + matchmaking in `server/sync-server.js`)
 
-On by default; `?p2p=0` turns it off for a session. Runs **alongside** the relay,
-never instead of it: Yjs dedupes whatever arrives on both paths.
+On by default; `?p2p=0` turns it off for a session. **Devices talk over the
+links, not through the server** — strokes *and* presence. The relay socket
+stays open on every device (loading the stored note, close codes for
+revocation, the fallback), but how much it carries is decided per device by
+`RelayMode` (`relayMode.ts`):
+
+- **quiet** — linked to the hub: nothing goes up, the server sends nothing
+  down but a keepalive every 15 s (y-websocket reconnects after 30 s of
+  silence). The provider's doc and awareness handlers are simply detached
+  (`_updateHandler`, `_awarenessUpdateHandler`); coming back sends
+  `MESSAGE_QUIET 0`, the server answers with its SyncStep1 and everyone's
+  presence, and we send our SyncStep1 — both sides catch up.
+- **saver** — the hub with nobody else listening on the relay: doc updates
+  go up merged every `SAVE_EVERY_MS` (5 s) and when the page is hidden or
+  the note closes; no presence. So the server's copy is at most ~5 s behind.
+- **live** — the relay as before: a device with no link (yet, or none
+  possible), and the hub while such a device is on the relay.
+
+The server learns *quiet* from `MESSAGE_QUIET` (100) and tells each listening
+connection how many others listen (`MESSAGE_LISTENERS`, 101); both are
+message types y-websocket doesn't use (the client registers 101 in
+`provider.messageHandlers`). Relay broadcasts skip quiet connections and the
+sender. Whatever arrives on two paths (a link and the relay) Yjs dedupes.
 
 - **The star IS the permission model** (carried over from the v1 broadcast).
-  The hub is the longest-connected *editor*; every other device links to the hub
+  The hub is the **owner's device** when it's connected (its matchmaking socket
+  carries `&owner=<proof>`; the owner's copy is the one the server should
+  keep), else the longest-connected *editor*; every other device links to the hub
   and nothing else. The hub drops `UPDATE`s from observer links (`P2PLinks.#onData`,
   the `link.role !== 'edit'` check) and fans the rest out. Do not "upgrade" this
   to a mesh (e.g. `y-webrtc`) — a mesh lets peers talk directly, which makes
@@ -643,17 +693,30 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   Any device whose matchmaking socket closes drops all its links (the server no
   longer vouches for it), then reconnects.
 - **Hub handover** is automatic: when the hub's socket closes, the next editor is
-  announced, and everyone re-links.
+  announced, and everyone re-links (also when the owner arrives). Devices
+  briefly go *live* on the relay while unlinked.
+- **Presence over the links** (`TAG_AWARENESS`): a device sends only its own
+  awareness state to the hub (`#awUpdate`); the hub applies it with the
+  `Link` as origin and fans every change out to the other links (and, while
+  *live*, the y-websocket provider passes it to the relay for relay-only
+  devices). The hub checks what it gets like the relay does: only that
+  device's client id (the first one it sent), `laser`/`live` only from
+  editors, `pull`/`lead` only from the owner (the server marks owner links
+  in the hub's peer list). Matchmaking tells everyone whether the hub is the
+  owner (`hubOwner`); if not, devices drop `pull`/`lead` from it, so an
+  editor acting as hub can't move anyone. When a link drops, the presence
+  that came over it is removed **and its clocks forgotten** (`#forget`), and
+  a device bumps its own clock when a link opens — the same clock trap as
+  *Reconnects re-announce presence*.
 - **Update origins matter.** A non-hub device applies updates from the hub with
   the *relay provider* as origin, so y-websocket doesn't upload them again and
   `Y.UndoManager` ignores them. The hub applies a device's update with that
   `Link` as origin, so its fan-out skips the sender. Keep both.
-- Data channel protocol is hand-rolled on plain `yjs` (tags `SV`/`UPDATE`) rather
+- Data channel protocol is hand-rolled on plain `yjs` (tags `SV`/`UPDATE`/`AWARENESS`) rather
   than y-protocols + simple-peer — `simple-peer` needs Node globals (`Buffer`/
   `process`) that Vite won't supply without polyfill config.
 - STUN only, no TURN, on purpose: TURN would relay the stroke data. Pairs that
-  can't connect directly just keep using the relay.
-- Presence (awareness) still goes through the relay only.
+  can't connect directly just keep using the relay (*live*).
 
 ### Pages & PDFs (`pages.ts`, `pdf.ts`, `exportPdf.ts`, `noteStore`)
 
@@ -705,6 +768,29 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   Keep the marker key and layer name stable: old exports depend on them.
 - **Dropping a PDF** file anywhere on the note (editors) imports it like
   ⋯ → Import PDF; a dashed hint shows while a file is dragged over.
+  **On the start page** it makes a new note: dropped on a folder chip (or a
+  path button) into that folder, elsewhere into the folder shown. Signed
+  in, a private note named after the file (`nameFromFile`; `-2`, `-3`… if
+  taken) is created at once; signed out the New note form opens with the
+  name and the PDF waiting for passcodes. Home hands the file over
+  (`pendingImport.ts`) and `NoteView` imports it on mount.
+- **Opening a PDF with conote** goes the same way (a new note, in the folder
+  the start page shows). The web manifest's `file_handlers` (action
+  `/?open=pdf`, `launch_handler: focus-existing`) puts the installed app in
+  *Open with* on desktop Chrome/Edge; the Android app has the matching
+  intent filter (`FileHandlingActivity0` in `AndroidManifest.xml`,
+  `fileHandlingActionUrl0` in `app/build.gradle`, `fileHandlers` in
+  `twa-manifest.json` — as Bubblewrap generates them). Either way the file
+  arrives in `launchQueue` (`+page.svelte`), which sends it to Home
+  (`openFile`). Safari has neither, so the New note form also has *Or start
+  from a PDF…* (a file picker; its input sits outside the form).
+- **Glued export** (⋯ → *Export, added pages glued on*, notes with added
+  pages): each page and the pages beside it become one PDF page of their
+  summed size, touching, laid out as on screen. The original page goes in
+  as a form XObject (`embedPage` with the crop box, identity matrix) drawn
+  through `layout ∘ vt`, so rotation and crop come out as on screen; ink
+  per part through its own offset. A page with nothing beside it is copied
+  as in the plain export. conote.json describes the glued pages.
 - **Long PDFs** (≥ `PICK_PAGES_FROM`, 31 pages) ask which pages to take
   (`importPdf(file, choose)` → `PagePicker`): the outline's first two levels
   as chapters (`readChapters`: each up to the next bookmark at its level or
@@ -784,10 +870,19 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   arc's table at −1, the view went NaN, a PDF page rendered into a 0×0
   canvas, and `drawImage` of it threw every frame — on the user's tablet a
   blank screen that wouldn't scroll. A non-finite step is skipped too.
-  **The relay enforces owner-only:** `stripFields` removes `pull` from every
-  awareness update arriving on a connection without a valid owner proof, so
-  any `pull` a device sees came from the owner. (Awareness doesn't travel
-  over the direct links, so there's no second path to guard.)
+  **Owner-only is enforced on both paths:** the relay's `stripFields`
+  removes `pull` (and `lead`) from every awareness update arriving on a
+  connection without a valid owner proof, and over the direct links the hub
+  strips them from non-owner links and devices ignore them from a hub that
+  isn't the owner (see *Direct links*).
+- **Leading** (*Everyone follows me*, owner only: the radio button beside
+  *Bring everyone here* on wide screens, a switch in the people panel):
+  presence carries `lead: <n>` (new each time it's switched on) until it's
+  switched off. A device seeing a new lead sets `follow` to the owner's
+  presence id — the ordinary follow-a-device glide — with a 3 s notice; a
+  hand pan/zoom lets go as always, and then a lasting *<owner> is leading ·
+  Follow* notice offers to follow again; when the lead ends, a device still
+  following stays where it was left. Stripped like `pull`.
 - **Laser pointer** (tool `'laser'`, editors): while held, presence carries
   `laser: true` and the cursor goes out every `LASER_EVERY_MS` (30) instead
   of 50. Every device — the sender from its own raw samples, the others from
@@ -1102,13 +1197,23 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
   (`effectiveMode` → observe), others' view frames hidden (`showViews`;
   cursors, live strokes and lasers still show), fullscreen when the browser
   allows (leaving fullscreen leaves focus), the cursor hidden when idle, and a
-  bar at the bottom that shows on movement and hides after ~2.6 s. Observers
-  open in it. The bar picks what to **follow**: `follow` is `null`,
+  bar at the bottom that shows on movement and hides after ~2.6 s. **Entering
+  it doesn't touch the view** (the user's call: focus only moves the bars
+  away). Observers open in it, following the whole note. The bar picks what
+  to **follow** (tap the chip again to stop): `follow` is `null`,
   `'drawing'` (fit everything as it grows — the old *Follow*), or a presence
   id (that device's `view`); one effect hands the target box to
-  `DrawingCanvas.follow`, which eases toward it, and falls back if the device
-  leaves. Any hand pan/zoom sets
-  `follow = null`, as before.
+  `DrawingCanvas.follow`, which eases toward it, and stops (stays put) if
+  the device leaves. Any hand pan/zoom sets `follow = null`, as before.
+- **Tabs** (`tabs.svelte.ts`, per device `conote:tabs`, at most 8): every
+  note opened gets one. Wide screens show the other tabs as chips beside the
+  name, with a + that opens the tabs panel (switch, close, open another of
+  the device's notes); phones show a count in the back button's place once
+  there are two, opening the same panel (which has *All notes*). One note is
+  connected at a time: switching remounts `NoteView` (keyed), which
+  disconnects only if the store is still on its note (`noteStore.id`), so
+  the next tab's `connect()` isn't undone. Each tab keeps its zoom, scroll,
+  focus, tool and ink (`tabs.remember` on leaving; a reload's resume wins).
 - **Presenting** (`presenting`, F5 or the button beside focus — wide
   screens with pages only; ⋯ → Present everywhere; Esc ends): the pages in
   export order are the slides. Chrome gone, fullscreen if allowed, a dark
@@ -1130,8 +1235,8 @@ never instead of it: Yjs dedupes whatever arrives on both paths.
 
 See `ROADMAP.md` for the full plan and the still-open questions. Highlights:
 
-- **Taking stroke traffic off the server.** Direct links are an extra path; the
-  relay still fans every stroke out to every device. See ROADMAP for options.
+- **Background tabs stay disconnected.** One note is connected at a time;
+  a tab you switch away from catches up when you come back.
 - **Passcode strength** — weak ones are refused and guessing is budgeted, but the
   4-character minimum stands; a 4-digit PIN still falls to patient guessing.
 - **Off-machine backups** — the daily tarballs stay on the VPS.

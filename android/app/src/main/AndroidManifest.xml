@@ -157,6 +157,23 @@
             
         </activity>
 
+        <!-- "Open with conote" for PDFs (as Bubblewrap generates for the web
+             manifest's file_handlers): the file goes to the page's launchQueue. -->
+        <activity-alias
+            android:name="FileHandlingActivity0"
+            android:targetActivity="LauncherActivity"
+            android:exported="true">
+            <meta-data android:name="android.support.customtabs.trusted.FILE_HANDLING_ACTION_URL"
+                android:value="@string/fileHandlingActionUrl0" />
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="content" />
+                <data android:mimeType="application/pdf" />
+            </intent-filter>
+        </activity-alias>
+
         <activity android:name="com.google.androidbrowserhelper.trusted.FocusActivity" />
 
         <activity android:name="com.google.androidbrowserhelper.trusted.WebViewFallbackActivity"

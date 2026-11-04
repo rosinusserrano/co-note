@@ -29,13 +29,18 @@
 	import ZoteroConnect from './ZoteroConnect.svelte';
 	import { appUpdate } from '$lib/appUpdate.svelte';
 	import { destroyNoteData } from '$lib/notes/noteStore.svelte';
+	import { handOver, nameFromFile } from '$lib/notes/pendingImport';
 
 	interface Props {
 		/** Prefill for the join form, from a shared `?join=<name>` link. */
 		joinName?: string;
 		onopen: (id: string) => void;
+		/** A PDF the system opened the app with: it becomes a new note. */
+		openFile?: File | null;
+		/** …and was taken. */
+		onfile?: () => void;
 	}
-	let { joinName = '', onopen }: Props = $props();
+	let { joinName = '', onopen, openFile = null, onfile }: Props = $props();
 
 	// A shared link lands on Join; a bare visit most likely wants a new note.
 	let tab = $state<'join' | 'create' | 'account'>(untrack(() => (joinName ? 'join' : 'create')));
@@ -171,11 +176,116 @@
 					: { name, editPasscode, viewAccess, viewPasscode: viewAccess === 'passcode' ? viewPasscode : undefined }
 			);
 			setMyName(me);
-			opened(noteIndex.save(session, via()));
+			const entry = noteIndex.save(session, via());
+			const drop = dropped;
+			dropped = null;
+			if (drop) {
+				// Made for a dropped PDF: into the folder it was dropped on, PDF and all.
+				if (drop.folder) void fileNote(entry, drop.folder);
+				handOver(entry.id, drop.file);
+				return onopen(entry.id);
+			}
+			opened(entry);
 		} catch (err) {
 			createForm.error = errorText(err);
 		} finally {
 			createForm.busy = false;
+		}
+	}
+
+	// --- A PDF dropped on the page: a new note with it, in that folder ----------
+
+	/** Signed out, a dropped PDF waits in the New note form for passcodes. */
+	let dropped = $state<{ file: File; folder: string } | null>(null);
+	/** While a file is dragged over the page: the folder it would land in. */
+	let dropFolder = $state<string | null>(null);
+	let dropBusy = $state('');
+	let dragDepth = 0;
+	const draggingFiles = (e: DragEvent) => !!e.dataTransfer?.types.includes('Files');
+	/** The folder under the pointer (a folder chip or a path button), else the one shown. */
+	const folderAt = (e: DragEvent) => {
+		const el = (e.target as Element | null)?.closest?.('[data-drop-folder]') as HTMLElement | null;
+		return el ? (el.dataset.dropFolder ?? '') : folder;
+	};
+
+	function onDragEnter(e: DragEvent) {
+		if (!draggingFiles(e)) return;
+		e.preventDefault();
+		dragDepth++;
+		dropFolder = folderAt(e);
+	}
+	function onDragOver(e: DragEvent) {
+		if (!draggingFiles(e)) return;
+		e.preventDefault(); // or the browser opens the file itself
+		e.dataTransfer!.dropEffect = 'copy';
+		dropFolder = folderAt(e);
+	}
+	function onDragLeave(e: DragEvent) {
+		if (!draggingFiles(e)) return;
+		dragDepth = Math.max(0, dragDepth - 1);
+		if (dragDepth === 0) dropFolder = null;
+	}
+	function onDrop(e: DragEvent) {
+		if (!draggingFiles(e)) return;
+		e.preventDefault();
+		const to = folderAt(e);
+		dragDepth = 0;
+		dropFolder = null;
+		const file = [...(e.dataTransfer?.files ?? [])].find((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+		if (!file) return alert('Only a PDF can be dropped here: it becomes a new note.');
+		void noteFromPdf(file, to);
+	}
+
+	// Opened with a PDF (from the system): a new note, in the folder shown.
+	$effect(() => {
+		const file = openFile;
+		if (!file) return;
+		untrack(() => {
+			onfile?.();
+			void noteFromPdf(file, folder);
+		});
+	});
+
+	/** "Start from a PDF": the file picker, for systems that can't open PDFs with an app. */
+	let pdfPick = $state<HTMLInputElement>();
+	function pickedPdf(e: Event) {
+		const input = e.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = '';
+		if (file) void noteFromPdf(file, folder);
+	}
+
+	/** Signed in: a private note named after the file, right away. Signed out
+	 *  it needs passcodes, so the New note form opens with the name filled in. */
+	async function noteFromPdf(file: File, to: string) {
+		const base = nameFromFile(file.name);
+		if (!account.signedIn) {
+			dropped = { file, folder: to };
+			createForm.name = base;
+			createForm.error = '';
+			tab = 'create';
+			return;
+		}
+		dropBusy = file.name;
+		try {
+			for (let i = 1; ; i++) {
+				const name = i === 1 ? base : `${base}-${i}`;
+				try {
+					const session = await createNote({ name, private: true, viewAccess: 'none' });
+					setMyName(me);
+					const entry = noteIndex.save(session, via());
+					if (to) void fileNote(entry, to);
+					handOver(entry.id, file);
+					return onopen(entry.id);
+				} catch (err) {
+					// Taken: try the next number.
+					if (!(err instanceof ApiError && err.status === 409) || i >= 20) throw err;
+				}
+			}
+		} catch (err) {
+			alert(`Couldn't make a note for ${file.name}: ${errorText(err)}`);
+		} finally {
+			dropBusy = '';
 		}
 	}
 
@@ -299,7 +409,19 @@
 	<path class="draw d4" pathLength="1" d="M226 150 l 10 14 l 18 -30" />
 {/snippet}
 
-<div class="home">
+<div class="home" role="region" aria-label="Start" ondragenter={onDragEnter} ondragover={onDragOver} ondragleave={onDragLeave} ondrop={onDrop}>
+	{#if dropFolder !== null || dropBusy}
+		<div class="dropzone" transition:fly={{ y: 8, duration: 160 }}>
+			<Icon name="fileUp" size={20} />
+			<span class="serif">
+				{#if dropBusy}
+					Making a note for {dropBusy}…
+				{:else}
+					Drop a PDF for a new note{#if dropFolder}{' in '}<b>{folderName(dropFolder)}</b>{/if}
+				{/if}
+			</span>
+		</div>
+	{/if}
 	<header class="top" in:fly={{ y: -8, duration: 400 }}>
 		<span class="wordmark">co<em>note</em></span>
 		{#if account.signedIn}
@@ -324,10 +446,12 @@
 				<section class="index">
 					{#if folder}
 						<nav class="crumbs" aria-label="Folder path">
-							<button class="fchip" onclick={() => showFolder('')}>All</button>
+							<button class="fchip" class:target={dropFolder === ''} data-drop-folder="" onclick={() => showFolder('')}>All</button>
 							{#each crumbs as c (c)}
 								<Icon name="chevronRight" size={14} />
-								<button class="fchip" onclick={() => showFolder(c)}><Icon name="folder" size={15} />{folderName(c)}</button>
+								<button class="fchip" class:target={dropFolder === c} data-drop-folder={c} onclick={() => showFolder(c)}
+									><Icon name="folder" size={15} />{folderName(c)}</button
+								>
 							{/each}
 							<Icon name="chevronRight" size={14} />
 						</nav>
@@ -339,7 +463,7 @@
 					{#if subfolders.length > 0}
 						<div class="folders" aria-label={folder ? 'Subfolders' : 'Folders'}>
 							{#each subfolders as f (f)}
-								<button class="fchip" onclick={() => showFolder(f)}>
+								<button class="fchip" class:target={dropFolder === f} data-drop-folder={f} onclick={() => showFolder(f)}>
 									<Icon name="folder" size={15} />{folderName(f)}
 									<span class="kicker">{countIn(f)}</span>
 								</button>
@@ -560,6 +684,13 @@
 			{:else}
 				<form class="card" onsubmit={create}>
 					<h2>Start a new note</h2>
+					{#if !dropped}
+						<p class="frompdf">
+							<button type="button" class="link" onclick={() => pdfPick?.click()}>
+								<Icon name="fileUp" size={15} />Or start from a PDF…
+							</button>
+						</p>
+					{/if}
 					<label class="field">
 						<span class="kicker">Note name</span>
 						<input class="input" bind:value={createForm.name} autocomplete="off" autocapitalize="none" spellcheck="false" required />
@@ -606,6 +737,12 @@
 					{/if}
 					{@render yourName()}
 					{#if createForm.error}<p class="error-text">{createForm.error}</p>{/if}
+					{#if dropped}
+						<p class="note dropped">
+							<Icon name="fileUp" size={16} /><span><b>{dropped.file.name}</b> goes into the new note{#if dropped.folder}{`, in ${folderName(dropped.folder)}`}{/if}.</span>
+							<button type="button" class="link" onclick={() => (dropped = null)}>Leave it out</button>
+						</p>
+					{/if}
 					{#if !account.signedIn}
 						<p class="note warn">
 							Not signed in: this note won't be kept. It ends a couple of minutes after the last person leaves.
@@ -619,6 +756,8 @@
 			{/if}
 		</div>
 	</section>
+
+	<input bind:this={pdfPick} type="file" accept="application/pdf,.pdf" hidden onchange={pickedPdf} />
 
 	<footer class="kicker">
 		<span title="This build">conote · {__BUILD_ID__}</span>
@@ -1096,6 +1235,47 @@
 	}
 	.fchip .kicker {
 		color: var(--smoke);
+	}
+	.fchip.target {
+		background: var(--lime);
+		border-color: var(--ink);
+	}
+	/* A PDF dragged over the page. */
+	.dropzone {
+		position: fixed;
+		left: 50%;
+		bottom: max(1.5rem, env(safe-area-inset-bottom));
+		transform: translateX(-50%);
+		z-index: 50;
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		max-width: calc(100vw - 2rem);
+		padding: 0.7rem 1.1rem;
+		border-radius: 999px;
+		background: var(--ink);
+		color: var(--paper);
+		box-shadow: var(--shadow-float);
+		pointer-events: none;
+		font-size: 1.1rem;
+	}
+	.dropzone b {
+		color: var(--lime);
+		font-weight: inherit;
+	}
+	.frompdf {
+		margin: -0.4rem 0 0;
+	}
+	.frompdf .link {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+	.note.dropped {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
 	}
 	.fchip:hover {
 		border-color: var(--ink);

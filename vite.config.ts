@@ -24,6 +24,12 @@ export default defineConfig({
 				background_color: '#f4f0e7',
 				display: 'standalone',
 				orientation: 'any',
+				// "Open with conote" for PDFs (installed app on desktop Chrome/Edge,
+				// and the Android app, whose intent filter points at the same
+				// action): the file arrives through launchQueue, see +page.svelte.
+				file_handlers: [{ action: '/?open=pdf', accept: { 'application/pdf': ['.pdf'] } }],
+				// A file opened while conote is open goes to that window.
+				launch_handler: { client_mode: 'focus-existing' },
 				icons: [
 					{ src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
 					{ src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
