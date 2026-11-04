@@ -704,6 +704,17 @@
 		pullSentTimer = setTimeout(() => (pullSent = false), 1500);
 	}
 
+	/** Bring just one device here (people panel); lights its button briefly. */
+	let pulledOne = $state<number | null>(null);
+	let pulledOneTimer: ReturnType<typeof setTimeout> | undefined;
+	function pullOne(id: number) {
+		if (canvasWidth <= 0 || canvasHeight <= 0) return;
+		noteStore.pullEveryone(viewport.visible(canvasWidth, canvasHeight), pullMotion, id);
+		pulledOne = id;
+		clearTimeout(pulledOneTimer);
+		pulledOneTimer = setTimeout(() => (pulledOne = null), 1500);
+	}
+
 	// --- Leading: the owner's view, followed by everyone until switched off ---
 
 	/** We (the owner) ask everyone to follow our view. */
@@ -1985,6 +1996,18 @@
 							<button class="mini" class:lime={follow === p.id} onclick={() => followWho(p.id)} disabled={!p.view}>
 								{follow === p.id ? 'Following' : 'Follow'}
 							</button>
+							{#if owner}
+								<button
+									class="mini icon"
+									class:lime={pulledOne === p.id}
+									onclick={() => pullOne(p.id)}
+									disabled={noteStore.access !== 'ok'}
+									title="Bring {p.label || 'this device'} here"
+									aria-label="Bring {p.label || 'this device'} here"
+								>
+									<Icon name={pulledOne === p.id ? 'check' : 'gather'} size={14} />
+								</button>
+							{/if}
 						</li>
 					{/each}
 				</ul>
@@ -3469,6 +3492,11 @@
 		color: inherit;
 		cursor: pointer;
 		white-space: nowrap;
+	}
+	.mini.icon {
+		display: grid;
+		place-items: center;
+		padding: 0.3rem 0.5rem;
 	}
 	.mini.lime {
 		background: var(--lime);

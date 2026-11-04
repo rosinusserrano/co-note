@@ -847,9 +847,12 @@ sender. Whatever arrives on two paths (a link and the relay) Yjs dedupes.
   views are only *drawn* — never adopted — with two exceptions: pulls, below,
   and following a device (Focus, under *Design & chrome*), which this device
   chooses itself.
-- **Pulls** (*Bring all here*, owner only): `pullEveryone(view)` puts
-  `pull: {n, view}` in the owner's presence for `PULL_TTL_MS` (4s), so a
-  device connecting in that window is pulled too and a later one isn't.
+- **Pulls** (*Bring all here*, owner only): `pullEveryone(view, motion, to?)` puts
+  `pull: {n, view, motion, to?}` in the owner's presence for `PULL_TTL_MS`
+  (4s), so a device connecting in that window is pulled too and a later one
+  isn't. **One device** (the owner's *Bring … here* button on that device's
+  row in the people panel): `to` = its presence id, and every other device
+  skips the pull (devices from before `to` would come along too).
   Receivers act once per `(client, n)` (`#readPulls` → `noteStore.pulled`):
   `NoteView` turns *Follow* off and calls `DrawingCanvas.showView`, which
   brings it to that rect and **waits for pen-up** if a stroke or gesture is

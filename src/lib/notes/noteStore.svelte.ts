@@ -110,7 +110,7 @@ const PULL_TTL_MS = 4000;
 
 /** What this session publishes about itself (see Presence). */
 export type LocalPresence = Partial<Pick<Presence, 'label' | 'cursor' | 'view' | 'laser' | 'lead'>> & {
-	pull?: { n: number; view: Rect; motion: PullMotion };
+	pull?: { n: number; view: Rect; motion: PullMotion; to?: number };
 	live?: LiveChunk | null;
 };
 
@@ -510,11 +510,12 @@ class NoteStore {
 		aw.setLocalState({ ...prev, ...fields });
 	}
 
-	/** Bring everyone else to `view` (world rect): published in our presence
-	 *  for a few seconds. Only takes effect from the owner's device; the relay
-	 *  strips it from anyone else's. */
-	pullEveryone(view: Rect, motion: PullMotion) {
-		this.setPresence({ pull: { n: ++this.#pullSeq, view, motion } });
+	/** Bring everyone else — or just the session `to` (a presence id) — to
+	 *  `view` (world rect): published in our presence for a few seconds. Only
+	 *  takes effect from the owner's device; the relay strips it from anyone
+	 *  else's. */
+	pullEveryone(view: Rect, motion: PullMotion, to?: number) {
+		this.setPresence({ pull: { n: ++this.#pullSeq, view, motion, ...(to === undefined ? {} : { to }) } });
 		if (this.#pullTimer) clearTimeout(this.#pullTimer);
 		const ws = this.#ws;
 		this.#pullTimer = setTimeout(() => {
@@ -530,6 +531,7 @@ class NoteStore {
 		for (const [id, st] of states) {
 			const p = st?.pull;
 			if (id === self || !p || !Number.isInteger(p.n)) continue;
+			if (p.to !== undefined && p.to !== self) continue; // meant for one other device
 			const view = readRect(p.view);
 			if (!view || this.#pullsSeen.get(id) === p.n) continue;
 			this.#pullsSeen.set(id, p.n);
