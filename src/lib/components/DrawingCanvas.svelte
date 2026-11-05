@@ -31,7 +31,7 @@
 	import { framing, type Box, type Viewport } from '$lib/notes/viewport.svelte';
 	import { inkShape, liveInkShape, isMarker, strokeZoom, MARKER_ALPHA, PEN_SENSE, type InkShape } from '$lib/notes/ink';
 	import type { Brush } from '$lib/notes/model';
-	import { pageAt, PAGE_GAP, type PlacedPage } from '$lib/notes/pages';
+	import { pageAt, slotAt, PAGE_GAP, type PageSlot, type PlacedPage } from '$lib/notes/pages';
 	import type { PageRenderer, PdfLink } from '$lib/notes/pdf';
 	import { clipboard, copyItems, itemIds, itemsBounds, itemsById, lassoed, place, type Items } from '$lib/notes/selection';
 	import Icon from './Icon.svelte';
@@ -70,8 +70,12 @@
 		height?: number;
 		/** Called when the user pans or zooms by hand (e.g. to leave follow mode). */
 		onnavigate?: () => void;
-		/** Show add/delete buttons on pages (editors). */
+		/** Show add/delete buttons and the page menu on pages (editors). */
 		pageActions?: boolean;
+		/** Arranging pages: a drag on a page moves it (editors). */
+		arranging?: boolean;
+		/** The page menu's *Arrange by dragging*. */
+		onarrange?: () => void;
 		/** After scrolling stops, glide to the nearest page edge (pages only). */
 		snap?: boolean;
 		/** Called with true when a stroke or laser starts and false when it
@@ -116,6 +120,8 @@
 		height = $bindable(0),
 		onnavigate,
 		pageActions = false,
+		arranging = false,
+		onarrange,
 		snap = false,
 		onactive,
 		fingerInks = false,
@@ -1564,6 +1570,70 @@
 		noteStore.deletePage(p.id);
 	}
 
+	// --- Arranging pages ----------------------------------------------------------
+
+	/** The page menu (⋯ on a page's label): the page it's open for. */
+	let pageMenu = $state<string | null>(null);
+	/** Rows run across the screen when pages go top to bottom, else down it. */
+	const rowWord = $derived(noteStore.layout === 'vertical' ? 'row' : 'column');
+	const pageName = (n: number) => `P.${String(n).padStart(2, '0')}`;
+
+	function pageCmd(fn: () => void) {
+		pageMenu = null;
+		fn();
+	}
+
+	/** A page being dragged while arranging: `grab` is where it was taken
+	 *  (page-local), `from` / `at` the pointer (canvas-local). */
+	let pageDrag = $state<{ id: string; pointerId: number; grab: { x: number; y: number }; from: { x: number; y: number }; at: { x: number; y: number } } | null>(null);
+	const DRAG_MIN_PX = 6;
+
+	/** Where the dragged page would go, and the line that shows it. */
+	const dragTarget = $derived.by(() => {
+		if (!pageDrag || Math.hypot(pageDrag.at.x - pageDrag.from.x, pageDrag.at.y - pageDrag.from.y) < DRAG_MIN_PX) return null;
+		void viewport.scale;
+		void viewport.offset;
+		const w = viewport.toWorld(pageDrag.at.x, pageDrag.at.y);
+		return slotAt(noteStore.pages, noteStore.layout, w.x, w.y);
+	});
+
+	function startPageDrag(e: PointerEvent): boolean {
+		const at = local(e);
+		const w = viewport.toWorld(at.x, at.y);
+		const p = pageAt(noteStore.pages, w.x, w.y);
+		if (!p) return false;
+		e.preventDefault();
+		stopGlide();
+		canvas.setPointerCapture(e.pointerId);
+		pageDrag = { id: p.id, pointerId: e.pointerId, grab: { x: w.x - p.x, y: w.y - p.y }, from: at, at };
+		return true;
+	}
+
+	function endPageDrag(drop: boolean) {
+		const d = pageDrag;
+		const target = dragTarget;
+		pageDrag = null;
+		if (d && drop && target) noteStore.movePage(d.id, target.slot as PageSlot);
+	}
+
+	/** The dragged page's outline under the pointer, and its old place. */
+	const dragView = $derived.by(() => {
+		if (!pageDrag || !dragTarget) return null;
+		const p = noteStore.pages.find((q) => q.id === pageDrag!.id);
+		if (!p) return null;
+		const s = viewport.scale;
+		const home = viewport.toScreen(p.x, p.y);
+		const l = dragTarget.line;
+		const a = viewport.toScreen(l.x0, l.y0);
+		const b = viewport.toScreen(l.x1, l.y1);
+		return {
+			n: p.n,
+			home: { x: home.x, y: home.y, w: p.w * s, h: p.h * s },
+			ghost: { x: pageDrag.at.x - pageDrag.grab.x * s, y: pageDrag.at.y - pageDrag.grab.y * s, w: p.w * s, h: p.h * s },
+			line: { x: Math.min(a.x, b.x) - 3, y: Math.min(a.y, b.y) - 3, w: Math.abs(b.x - a.x) + 6, h: Math.abs(b.y - a.y) + 6 }
+		};
+	});
+
 	// --- Presence: tell the others where we are -----------------------------
 
 	/** Leading + trailing throttle: the first call goes out at once, the last
@@ -1818,6 +1888,8 @@
 	function onPointerDown(e: PointerEvent, late?: PenUse) {
 		if (late) return startInk(e, late, true);
 		measure(); // the canvas can move (banners above it) without resizing
+		if (pageDrag) return; // one page at a time; other fingers wait
+		if (arranging && e.button === 0 && touches.size === 0 && startPageDrag(e)) return;
 		tapFrom = local(e);
 		hoverLink(null);
 		pasteAt = null;
@@ -1981,6 +2053,10 @@
 	}
 
 	function onPointerMove(e: PointerEvent) {
+		if (e.pointerId === pageDrag?.pointerId) {
+			pageDrag.at = local(e);
+			return;
+		}
 		if (e.pointerType === 'pen') sawPen(); // touching or hovering
 		if (e.pointerId === touchInk) touchInkAt = local(e);
 		if (e.pointerType === 'touch' && !inkPointer(e.pointerId)) {
@@ -2101,6 +2177,7 @@
 	}
 
 	function onPointerUp(e: PointerEvent) {
+		if (e.pointerId === pageDrag?.pointerId) return endPageDrag(e.type !== 'pointercancel');
 		if (e.pointerType === 'pen') sawPen();
 		if (e.pointerId === touchInk) {
 			touchInk = null;
@@ -2355,6 +2432,7 @@
 
 	/** Is the pen/mouse/fingers in the middle of something? */
 	const busy = () =>
+		pageDrag !== null ||
 		drawingPointerId !== null ||
 		erasePointerId !== null ||
 		laserPointerId !== null ||
@@ -2564,6 +2642,11 @@
 </script>
 
 <svelte:window
+	onpointerdowncapture={(e) => {
+		if (pageMenu === null || (e.target as Element).closest?.('[data-pagemenu]')) return;
+		pageMenu = null;
+		if (e.target === canvas) e.stopPropagation(); // only closes it, draws nothing
+	}}
 	onkeydown={(e) => {
 		onKey(e);
 		onSelectionKey(e);
@@ -2580,7 +2663,9 @@
 		onpointerleave={onPointerLeave}
 		onauxclick={(e) => e.preventDefault()}
 		oncontextmenu={(e) => e.preventDefault()}
-		data-cursor={panning
+		data-cursor={pageDrag
+			? 'grabbing'
+			: panning
 			? 'grabbing'
 			: tool === 'hand' || spaceHeld || mode !== 'draw'
 				? 'grab'
@@ -2667,13 +2752,56 @@
 						onclick={() => noteStore.insertPageAfter(page.id)}
 						>+ page {noteStore.layout === 'vertical' ? '→' : '↓'}</button
 					>
+					<button
+						class="more"
+						class:on={pageMenu === page.id}
+						title={`Page ${page.n}: add, move, delete`}
+						aria-label={`Page ${page.n} options`}
+						aria-expanded={pageMenu === page.id}
+						data-pagemenu
+						onclick={() => (pageMenu = pageMenu === page.id ? null : page.id)}>⋯</button
+					>
 					<button title={`Delete page ${page.n}`} aria-label={`Delete page ${page.n}`} onclick={() => deletePage(page)}
 						>✕</button
 					>
+					{#if pageMenu === page.id}
+						{@const last = page.n === noteStore.pages.length}
+						<div class="pagemenu" role="menu" data-pagemenu>
+							<button role="menuitem" onclick={() => pageCmd(() => noteStore.insertPageBefore(page.id))}>Add a page before</button>
+							<button role="menuitem" onclick={() => pageCmd(() => noteStore.insertPageAfter(page.id))}>Add a page after</button>
+							<hr />
+							<button role="menuitem" disabled={page.n === 1} onclick={() => pageCmd(() => noteStore.swapPage(page.id, -1))}
+								>Swap with {pageName(page.n - 1)}</button
+							>
+							<button role="menuitem" disabled={last} onclick={() => pageCmd(() => noteStore.swapPage(page.id, 1))}
+								>Swap with {pageName(page.n + 1)}</button
+							>
+							{#if page.extra && page.n > 1}
+								<button role="menuitem" onclick={() => pageCmd(() => noteStore.setRowStart(page.id, true))}>Start a new {rowWord} here</button>
+							{:else if page.n > 1}
+								<button role="menuitem" onclick={() => pageCmd(() => noteStore.setRowStart(page.id, false))}
+									>Put beside {pageName(page.n - 1)}</button
+								>
+							{/if}
+							{#if onarrange && !arranging}
+								<button role="menuitem" onclick={() => pageCmd(() => onarrange?.())}>Arrange by dragging…</button>
+							{/if}
+							<hr />
+							<button role="menuitem" class="danger" onclick={() => pageCmd(() => deletePage(page))}>Delete page</button>
+						</div>
+					{/if}
 				{/if}
 			</div>
 		{/each}
 	</div>
+	{#if dragView}
+		<div class="draghome" style:left="{dragView.home.x}px" style:top="{dragView.home.y}px" style:width="{dragView.home.w}px" style:height="{dragView.home.h}px"></div>
+		<div class="dragghost" style:left="{dragView.ghost.x}px" style:top="{dragView.ghost.y}px" style:width="{dragView.ghost.w}px" style:height="{dragView.ghost.h}px">
+			<span>{pageName(dragView.n)}</span>
+		</div>
+		<!-- Above the outline: where it lands is what matters. -->
+		<div class="dragline" style:left="{dragView.line.x}px" style:top="{dragView.line.y}px" style:width="{dragView.line.w}px" style:height="{dragView.line.h}px"></div>
+	{/if}
 </div>
 
 <style>
@@ -2825,8 +2953,79 @@
 		cursor: pointer;
 		text-transform: uppercase;
 	}
-	.pill button:hover {
+	.pill button:hover,
+	.pill button.on {
 		background: var(--lime);
 		border-color: transparent;
+	}
+	.pill button.more {
+		padding: 0.1rem 0.45rem;
+	}
+	.pagemenu {
+		position: absolute;
+		top: calc(100% + 4px);
+		left: 0;
+		z-index: 5;
+		display: flex;
+		flex-direction: column;
+		min-width: 13rem;
+		padding: 0.35rem;
+		background: var(--sheet);
+		border-radius: 14px;
+		box-shadow: var(--shadow-card), 0 0 0 1px var(--rule);
+		font-family: var(--f-sans);
+		letter-spacing: 0;
+	}
+	.pill .pagemenu button {
+		text-align: left;
+		text-transform: none;
+		font: 500 0.85rem var(--f-sans);
+		background: none;
+		border: none;
+		border-radius: 9px;
+		padding: 0.45rem 0.6rem;
+	}
+	.pill .pagemenu button:hover:not(:disabled) {
+		background: var(--lime);
+	}
+	.pill .pagemenu button:disabled {
+		opacity: 0.4;
+		cursor: default;
+	}
+	.pill .pagemenu button.danger {
+		color: #c2381a;
+	}
+	.pill .pagemenu button.danger:hover {
+		background: rgb(194 56 26 / 0.1);
+	}
+	.pagemenu hr {
+		width: 100%;
+		margin: 0.25rem 0;
+		border: none;
+		border-top: 1px solid var(--rule);
+	}
+	.draghome,
+	.dragghost,
+	.dragline {
+		position: absolute;
+		pointer-events: none;
+	}
+	.draghome {
+		background: rgb(25 24 20 / 0.12);
+		outline: 2px dashed rgb(25 24 20 / 0.35);
+	}
+	.dragghost {
+		display: grid;
+		place-items: center;
+		background: rgb(255 255 255 / 0.55);
+		outline: 3px solid var(--lime-deep);
+		box-shadow: var(--shadow-card);
+		font: 500 0.8rem var(--f-mono);
+		color: var(--ink);
+	}
+	.dragline {
+		background: var(--ink);
+		border-radius: 4px;
+		box-shadow: 0 0 0 2px var(--lime);
 	}
 </style>

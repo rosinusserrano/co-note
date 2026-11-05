@@ -37,7 +37,7 @@ import { IndexeddbPersistence } from 'y-indexeddb';
 import { uid, type Brush, type PageEntry, type PageLayout, type Shape, type Stroke, type TextBox } from './model';
 import { P2PLinks } from './p2p';
 import { RelayMode, type RelayModeName } from './relayMode';
-import { layoutPages, contentBounds, PAGE_GAP, type PlacedPage } from './pages';
+import { layoutPages, contentBounds, PAGE_GAP, insertPage, moveToSlot, setRowStart, swapPage, type PageSlot, type PlacedPage } from './pages';
 import { getCachedFile, cacheFile, dropCachedFiles } from './files';
 import { uploadFile, downloadFile } from './api';
 import type { PdfChapter } from './pdf';
@@ -884,13 +884,59 @@ class NoteStore {
 	/** Add a blank page, the size of `afterId`, right after it: beside it in
 	 *  the UI, next in the exported PDF. */
 	insertPageAfter(afterId: string) {
+		this.#addBlank(afterId, 'after');
+	}
+
+	/** Add a blank page, the size of `id`, right before it in its row. */
+	insertPageBefore(id: string) {
+		this.#addBlank(id, 'before');
+	}
+
+	#addBlank(id: string, where: 'before' | 'after') {
+		const list = this.#pageList();
+		const at = list.find((p) => p.id === id);
+		if (at) this.#arrange(insertPage(list, id, where, { id: uid(), w: at.w, h: at.h, extra: true }));
+	}
+
+	/** Move a page (see `slotAt` in pages.ts for where it can go). */
+	movePage(id: string, slot: PageSlot) {
+		this.#arrange(moveToSlot(this.#pageList(), id, slot));
+	}
+
+	/** Swap a page with the one before (−1) or after (+1) it. */
+	swapPage(id: string, dir: -1 | 1) {
+		this.#arrange(swapPage(this.#pageList(), id, dir));
+	}
+
+	/** A page starting its own row, or joining the row before it. */
+	setRowStart(id: string, start: boolean) {
+		this.#arrange(setRowStart(this.#pageList(), id, start));
+	}
+
+	/** The doc's pages, each id once: two devices moving the same page at
+	 *  the same moment can leave two copies of it, and the first one counts. */
+	#pageList(): PageEntry[] {
+		const seen = new Set<string>();
+		return (this.#pages?.toArray() ?? []).filter((p) => !seen.has(p.id) && (seen.add(p.id), true));
+	}
+
+	/** Make the doc's page list `next`, as one undo step, rewriting only the
+	 *  stretch that changed (so others' edits elsewhere in the list survive). */
+	#arrange(next: PageEntry[]) {
 		const pages = this.#pages;
-		if (!pages) return;
-		const list = pages.toArray();
-		const i = list.findIndex((p) => p.id === afterId);
-		if (i < 0) return;
+		if (!pages || !this.#doc) return;
+		const cur = pages.toArray();
+		const same = (a: PageEntry, b: PageEntry) => a.id === b.id && a.extra === b.extra && a.w === b.w && a.h === b.h;
+		let head = 0;
+		while (head < cur.length && head < next.length && same(cur[head], next[head])) head++;
+		let tail = 0;
+		while (tail < cur.length - head && tail < next.length - head && same(cur[cur.length - 1 - tail], next[next.length - 1 - tail])) tail++;
+		if (head === cur.length && head === next.length) return;
 		this.beginChange();
-		pages.insert(i + 1, [{ id: uid(), w: list[i].w, h: list[i].h, extra: true }]);
+		this.#doc.transact(() => {
+			pages.delete(head, cur.length - head - tail);
+			pages.insert(head, next.slice(head, next.length - tail));
+		});
 	}
 
 	/** Remove a page. Its ink stays in the doc (hidden), so undo brings both back.
@@ -925,7 +971,7 @@ class NoteStore {
 	/** `glued`: each page and the pages added beside it as one PDF page. */
 	async exportPdf(glued = false): Promise<Uint8Array> {
 		const { exportPdf } = await import('./exportPdf');
-		return exportPdf(this.#pages?.toArray() ?? [], this.#cache, this.#textCache, this.#shapeCache, (h) => this.fileBytes(h), this.layout, glued);
+		return exportPdf(this.#pageList(), this.#cache, this.#textCache, this.#shapeCache, (h) => this.fileBytes(h), this.layout, glued);
 	}
 
 	#refresh() {
@@ -942,7 +988,7 @@ class NoteStore {
 		const name = this.#meta?.get('name');
 		this.name = typeof name === 'string' && /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/.test(name) ? name : '';
 		this.pages = layoutPages(
-			this.#pages?.toArray() ?? [],
+			this.#pageList(),
 			layout,
 			origin && Number.isFinite(origin.x) && Number.isFinite(origin.y) ? origin : undefined
 		);

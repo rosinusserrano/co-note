@@ -729,6 +729,20 @@ sender. Whatever arrives on two paths (a link and the relay) Yjs dedupes.
   next to the page before it (right of it when vertical, below when
   horizontal) and simply follows it in the export. "+ page" inserts an extra
   right after the clicked page. Deleting a main page promotes its first extra.
+- **Rearranging** (`pages.ts`: `pageRows`/`joinRows`, `moveToSlot`,
+  `swapPage`, `insertPage`, `setRowStart`, `slotAt`): every arrangement is
+  rows (a main page + the pages beside it), so a move is a list operation
+  and the `extra` flags follow from where a page lands. Each page label's
+  **⋯** menu: add a page before / after, swap with the page before / after,
+  *Put beside P.n* (joins the row before) / *Start a new row here*,
+  delete. **Arrange pages** (⋯ menu, or *Arrange by dragging* there):
+  nothing draws, a drag on a page moves it — over the middle of a row it
+  goes beside those pages (by which side of their middles), near a row's
+  edge or past the ends onto a row of its own; an outline follows the
+  pointer and a bar shows where it lands; Esc / *Done* ends it. Each
+  change is one undo step (`#arrange` rewrites only the stretch that
+  changed); the page list is read deduplicated by id (`#pageList`), since
+  two devices moving the same page at once can leave two copies.
 - **Ink on a page is page-local** (`Stroke.page` + coordinates in PDF points
   from the page's top-left, y down) and clipped to the page. That's what lets
   the layout change without moving ink off its page, and what makes export a

@@ -1051,7 +1051,13 @@
 	// An observer cannot ink. This mirrors the server's decision in the UI; it is
 	// NOT what enforces read-only (the server drops their writes). Focus mode
 	// watches, so it doesn't ink either.
-	const effectiveMode = $derived(canEdit && !focus ? mode : 'observe');
+	/** Arranging pages: a drag on a page moves it, nothing draws. */
+	let arranging = $state(false);
+	const effectiveMode = $derived(canEdit && !focus && !arranging ? mode : 'observe');
+	$effect(() => {
+		// Nothing left to arrange, or no longer allowed to.
+		if (arranging && (!canEdit || noteStore.pages.length === 0 || focus || presenting)) arranging = false;
+	});
 	const zoomPct = $derived(Math.round(viewport.scale * 100));
 	const roleLabel = $derived(owner ? 'Owner' : canEdit ? 'Editor' : 'Observer');
 
@@ -1178,6 +1184,7 @@
 		}
 		if (e.key === 'Escape') {
 			if (customizing) setCustomizing(false);
+			else if (arranging) arranging = false;
 			else if (pop) pop = '';
 			else if (focus) setFocus(false);
 			return;
@@ -1503,7 +1510,12 @@
 				inking = on;
 				if (on) pop = '';
 			}}
-			pageActions={canEdit && effectiveMode === 'draw' && !presenting}
+			pageActions={canEdit && (effectiveMode === 'draw' || arranging) && !presenting}
+			{arranging}
+			onarrange={() => {
+				pop = '';
+				arranging = true;
+			}}
 			snap={snap && !presenting}
 			{fingerInks}
 			onpen={onPen}
@@ -1739,6 +1751,9 @@
 			<button class="tool" onclick={() => noteStore.redo()} disabled={!noteStore.canRedo} title="Redo (Ctrl+Shift+Z)" aria-label="Redo">
 				<Icon name="redo" size={20} />
 			</button>
+		{:else if arranging}
+			<span class="kicker">Arranging</span>
+			<button class="mini lime" onclick={() => (arranging = false)}>Draw</button>
 		{:else}
 			<span class="kicker">Look only</span>
 			<button class="mini lime" onclick={() => (mode = 'draw')}>Draw</button>
@@ -2241,6 +2256,18 @@
 							>
 						</button>
 					{/if}
+					{#if canEdit && !presenting}
+						<button
+							class="item"
+							onclick={() => {
+								pop = '';
+								arranging = true;
+							}}
+							title="Drag pages to reorder them, put them side by side or on a row of their own. Each page's ⋯ has the same moves."
+						>
+							<Icon name="move" size={18} /><span>Arrange pages</span><span class="kicker">drag</span>
+						</button>
+					{/if}
 					<button class="item" onclick={toggleSnap} title="When scrolling stops, glide to the nearest page edge (this device only)">
 						<Icon name="magnet" size={18} /><span>Snap to pages</span><span class="kicker" class:lit={snap}>{snap ? 'on' : 'off'}</span>
 					</button>
@@ -2490,6 +2517,15 @@
 
 	<!-- Notices, top centre. -->
 	<div class="notices" aria-live="polite" style:--toprow="{focus || presenting ? 0 : rows.height.top}px">
+		{#if arranging}
+			<div class="notice custom" role="status" transition:fly={{ y: -12, duration: 220 }}>
+				<span class="kicker lime">Pages</span>
+				<span>Drag a page to move it: beside other pages, or between {noteStore.layout === 'vertical' ? 'rows' : 'columns'} for one of its own. Undo takes a move back.</span>
+				<span class="row">
+					<button class="mini lime" onclick={() => (arranging = false)}>Done</button>
+				</span>
+			</div>
+		{/if}
 		{#if customizing && !focus}
 			<div class="notice custom" role="status" transition:fly={{ y: -12, duration: 220 }}>
 				<span class="kicker lime">Bars</span>

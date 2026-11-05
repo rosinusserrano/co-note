@@ -51,10 +51,13 @@ missing); 5 s of the latest ink exists only on devices if the hub dies.
 Import a PDF into a note (pages rendered by pdf.js from the vectors at the
 current zoom), draw on its pages, add blank pages beside any page, run pages
 vertically or horizontally, export everything back as a PDF with the original
-pages untouched and the ink as vector paths. See CLAUDE.md "Pages & PDFs".
+pages untouched and the ink as vector paths. Pages rearrange freely: add
+before / after, swap, delete, put any two side by side or on a row of their
+own, from each page's ⋯ menu or by dragging (*Arrange pages*). See
+CLAUDE.md "Pages & PDFs".
 
 Open: file GC for unreferenced PDFs; shipping pdf.js standard fonts / CMaps
-(non-embedded fonts, CJK); blank pages in notes without a PDF; moving pages;
+(non-embedded fonts, CJK); blank pages in notes without a PDF;
 whether "Export" should also offer the free ink beside pages.
 
 ### Done: desktop navigation, brushes
