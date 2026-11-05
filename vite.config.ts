@@ -28,7 +28,8 @@ export default defineConfig({
 				// and the Android app, whose intent filter points at the same
 				// action): the file arrives through launchQueue, see +page.svelte.
 				file_handlers: [{ action: '/?open=pdf', accept: { 'application/pdf': ['.pdf'] } }],
-				// A file opened while conote is open goes to that window.
+				// Every launch (and every file opened with it) gets a window of its own:
+				// focus-existing stopped a second window from opening.
 				launch_handler: { client_mode: 'navigate-new' },
 				icons: [
 					{ src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
