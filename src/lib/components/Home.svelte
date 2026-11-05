@@ -7,6 +7,7 @@
 		joinNote,
 		forgetInAccount,
 		setNoteFolder,
+		renameNote,
 		normalizeName,
 		ApiError,
 		VIEW_ACCESS as ACCESS,
@@ -343,6 +344,7 @@
 	function showFolder(f: string) {
 		folderPick = f;
 		filing = null;
+		rowMenu = null;
 		try {
 			if (f) localStorage.setItem(FOLDER_KEY, f);
 			else localStorage.removeItem(FOLDER_KEY);
@@ -359,8 +361,30 @@
 	/** Notes in a folder, its subfolders' included. */
 	const countIn = (f: string) => noteIndex.notes.filter((n) => inFolder(n.folder, f)).length;
 
+	/** The note whose ⋯ is open (its row shows Rename / Folder / Forget). */
+	let rowMenu = $state<string | null>(null);
 	/** The note whose folder is being picked (its row opens a strip of folders). */
 	let filing = $state<string | null>(null);
+	/** The note being renamed (owners): its name turns into a field. */
+	let retitle = $state<{ id: string; name: string } | null>(null);
+
+	/** Rename a note (Enter or leaving the field); Esc cancels. */
+	async function saveTitle() {
+		if (!retitle) return;
+		const { id, name } = retitle;
+		retitle = null;
+		const n = noteIndex.get(id);
+		if (!n || !name.trim() || normalizeName(name) === n.name) return;
+		try {
+			noteIndex.save(await renameNote(id, name, n.ownerKey));
+		} catch (err) {
+			alert(`Couldn't rename "${n.name}": ${errorText(err)}`);
+		}
+	}
+	const focusNow = (el: HTMLInputElement) => {
+		el.focus();
+		el.select();
+	};
 	let newFolder = $state('');
 
 	/** File a note into `to` ('' = no folder): here, and in the account if it's there. */
@@ -473,30 +497,96 @@
 					<ol>
 						{#each listed as n, i (n.id)}
 							<li class:filing={filing === n.id}>
-								<button class="open" onclick={() => onopen(n.id)}>
-									<span class="no kicker">{String(i + 1).padStart(2, '0')}</span>
-									<span class="nm">{n.name}</span>
-									<span class="leader"></span>
-									{#if n.saved === false}<span class="unsaved kicker" title="Not in anyone's account: it ends when everyone leaves">unsaved</span>{/if}
-									{#if n.private}<span class="private kicker" title="No passcode: only your account opens it">private</span>{/if}
-									<span class="role kicker" data-role={isOwner(n) ? 'owner' : n.role}>{roleLabel(n)}</span>
-									<span class="when kicker">{ago(n.openedAt)}</span>
-								</button>
+								{#if retitle?.id === n.id}
+									<form
+										class="open retitle"
+										onsubmit={(e) => {
+											e.preventDefault();
+											void saveTitle();
+										}}
+									>
+										<span class="no kicker">{String(i + 1).padStart(2, '0')}</span>
+										<input
+											class="nmfield"
+											bind:value={retitle.name}
+											use:focusNow
+											maxlength="60"
+											autocomplete="off"
+											autocapitalize="none"
+											spellcheck="false"
+											aria-label={`New name for ${n.name}`}
+											onkeydown={(e) => {
+												if (e.key === 'Escape') retitle = null;
+											}}
+											onblur={() => void saveTitle()}
+										/>
+										{#if retitle.name.trim() && normalizeName(retitle.name) !== n.name}
+											<small>joins as <b>{normalizeName(retitle.name)}</b> · <b>{n.name}</b> stops working</small>
+										{/if}
+									</form>
+								{:else}
+									<button class="open" onclick={() => onopen(n.id)}>
+										<span class="no kicker">{String(i + 1).padStart(2, '0')}</span>
+										<span class="nm">{n.name}</span>
+										<span class="leader"></span>
+										{#if n.saved === false}<span class="unsaved kicker" title="Not in anyone's account: it ends when everyone leaves">unsaved</span>{/if}
+										{#if n.private}<span class="private kicker" title="No passcode: only your account opens it">private</span>{/if}
+										<span class="role kicker" data-role={isOwner(n) ? 'owner' : n.role}>{roleLabel(n)}</span>
+										<span class="when kicker">{ago(n.openedAt)}</span>
+									</button>
+								{/if}
 								<button
 									class="forget"
-									class:on={filing === n.id}
-									aria-label={`Folder for ${n.name}`}
-									title={n.folder ? `In “${n.folder}” — move to another folder` : 'Put in a folder'}
+									class:on={rowMenu === n.id || filing === n.id}
+									aria-label={`Options for ${n.name}`}
+									aria-expanded={rowMenu === n.id}
+									title="Rename, folder, forget"
 									onclick={() => {
-										filing = filing === n.id ? null : n.id;
+										const open = rowMenu === n.id || filing === n.id;
+										rowMenu = open ? null : n.id;
+										filing = null;
 										newFolder = '';
 									}}
 								>
-									<Icon name={n.folder ? 'folder' : 'folderPlus'} size={16} />
+									<Icon name="more" size={18} />
 								</button>
-								<button class="forget" aria-label={`Forget ${n.name}`} title="Forget on this device" onclick={() => forget(n)}>
-									<Icon name="x" size={16} />
-								</button>
+								{#if rowMenu === n.id}
+									<div class="rowmenu" transition:fly={{ y: -6, duration: 160 }}>
+										{#if isOwner(n)}
+											<button
+												class="fchip"
+												aria-label={`Rename ${n.name}`}
+												onclick={() => {
+													rowMenu = null;
+													retitle = { id: n.id, name: n.name };
+												}}
+											>
+												<Icon name="pencil" size={15} />Rename
+											</button>
+										{/if}
+										<button
+											class="fchip"
+											aria-label={`Folder for ${n.name}`}
+											onclick={() => {
+												rowMenu = null;
+												filing = n.id;
+												newFolder = '';
+											}}
+										>
+											<Icon name={n.folder ? 'folder' : 'folderPlus'} size={15} />{n.folder ? 'Move to another folder' : 'Put in a folder'}
+										</button>
+										<button
+											class="fchip"
+											aria-label={`Forget ${n.name}`}
+											onclick={() => {
+												rowMenu = null;
+												void forget(n);
+											}}
+										>
+											<Icon name="x" size={15} />{n.via && n.via === account.name ? 'Remove from my account' : 'Forget on this device'}
+										</button>
+									</div>
+								{/if}
 								{#if filing === n.id}
 									<form
 										class="filebar"
@@ -1207,9 +1297,6 @@
 		background: var(--ink);
 		color: var(--chalk);
 	}
-	.forget + .forget {
-		margin-left: 0;
-	}
 
 	/* Folders: the path above the name, subfolders under it, and a strip
 	   under a note to file it. */
@@ -1300,13 +1387,49 @@
 	.fchip.on .sep {
 		color: var(--lime);
 	}
-	.filebar {
+	.filebar,
+	.rowmenu {
 		flex-basis: 100%;
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
 		gap: 0.4rem;
 		padding: 0 0.5rem 0.9rem;
+	}
+	/* Renaming: the name becomes a field in its place. */
+	.retitle {
+		flex-wrap: wrap;
+		align-items: center;
+		row-gap: 0.3rem;
+		cursor: auto;
+	}
+	.retitle:hover {
+		background: transparent;
+	}
+	.nmfield {
+		flex: 1;
+		min-width: 0;
+		padding: 0.1rem 0.4rem;
+		border: none;
+		border-bottom: 2px solid var(--ink);
+		border-radius: 0;
+		background: var(--chalk);
+		color: var(--ink);
+		font-family: var(--f-serif);
+		font-style: italic;
+		font-size: clamp(1.4rem, 2.6vw, 1.85rem);
+		line-height: 1.1;
+		outline: none;
+	}
+	.retitle small {
+		flex-basis: 100%;
+		padding-left: 2.6rem;
+		color: var(--smoke);
+		font: 0.78rem var(--f-mono);
+	}
+	.retitle small b {
+		color: var(--ink);
+		font-weight: 500;
 	}
 	.filebar > .kicker {
 		color: var(--graphite);

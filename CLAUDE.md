@@ -521,8 +521,11 @@ must be preserved:
 - **Joining by name without a passcode** works for any note the signed-in
   account already holds (`join`: owner account, or a grant at the current
   epoch). An empty passcode otherwise answers like a wrong one, as slowly.
-- **Renaming** (`/api/owner/rename`, owner): normalised and unique like
-  create; the old name is freed. The server also writes the name into the
+- **Renaming** (`/api/owner/rename`, owner): a tap on the note's title
+  (or ⋯ → *Rename note*) turns it into a field, and on the start page a
+  row's ⋯ (*Rename* / folder / forget) does the same in the list; Enter or
+  leaving the field saves, Esc cancels; also in the settings dialog.
+  Normalised and unique like create; the old name is freed. The server also writes the name into the
   doc's `meta.name` (`stampName`: the live room, or the stored doc), so
   devices on the note — and anyone opening it later — update their list
   entry (`noteStore.name` → `noteIndex.rename`). Display only: an editor

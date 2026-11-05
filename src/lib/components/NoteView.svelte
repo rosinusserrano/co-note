@@ -14,6 +14,8 @@
 		joinNote,
 		ownerSession,
 		claimNote,
+		renameNote,
+		normalizeName,
 		zoteroVerify,
 		zoteroSearch,
 		zoteroPdfs,
@@ -610,6 +612,22 @@
 		me = myName();
 		renaming = null;
 		noteStore.setPresence({ label: myLabel });
+	}
+	// Renaming the note (owner): a tap on its title, or ⋯ → Rename note, turns
+	// the title into a field. Enter or leaving it saves, Esc cancels.
+	let retitle = $state<string | null>(null);
+	let retitleError = $state('');
+	async function saveTitle() {
+		if (retitle === null) return;
+		const name = retitle;
+		retitle = null;
+		if (!name.trim() || normalizeName(name) === entry.name) return;
+		try {
+			noteIndex.save(await renameNote(entry.id, name, entry.ownerKey));
+			retitleError = '';
+		} catch (err) {
+			retitleError = err instanceof ApiError ? err.message : "Couldn't reach the server, so the name stayed.";
+		}
 	}
 	const focusNow = (el: HTMLInputElement) => {
 		el.focus();
@@ -1548,7 +1566,30 @@
 				<button class="ibtn" onclick={onleave} title="All notes" aria-label="All notes"><Icon name="back" /></button>
 			{/if}
 			<div class="ident">
-				<span class="name" title={entry.name}>{entry.name}</span>
+				{#if retitle !== null}
+					<input
+						class="name titlefield"
+						bind:value={retitle}
+						use:focusNow
+						maxlength="60"
+						autocomplete="off"
+						autocapitalize="none"
+						spellcheck="false"
+						aria-label="Note name"
+						onkeydown={(e) => {
+							if (e.key === 'Enter') void saveTitle();
+							else if (e.key === 'Escape') {
+								e.stopPropagation();
+								retitle = null;
+							}
+						}}
+						onblur={() => void saveTitle()}
+					/>
+				{:else if owner}
+					<button class="name retitle" title="Rename {entry.name}" onclick={() => (retitle = entry.name)}>{entry.name}</button>
+				{:else}
+					<span class="name" title={entry.name}>{entry.name}</span>
+				{/if}
 				<span class="kicker meta">
 					<span class="role" data-role={owner ? 'owner' : entry.role}>{roleLabel}</span>
 					<span class="sep">/</span>
@@ -2366,6 +2407,15 @@
 					>
 						<Icon name="sliders" size={18} /><span>Name, passcodes &amp; access</span>
 					</button>
+					<button
+						class="item"
+						onclick={() => {
+							pop = '';
+							retitle = entry.name;
+						}}
+					>
+						<Icon name="pencil" size={18} /><span>Rename note</span>
+					</button>
 				{/if}
 				<p class="fine kicker keys">
 					{#if canEdit}<span>P B M T R E S L H — tools · Ctrl Z — undo</span>{/if}
@@ -2581,6 +2631,13 @@
 			<div class="notice" role="status" transition:fly={{ y: -12, duration: 220 }}>
 				<span class="kicker lime">Zotero</span>
 				<span>{zoteroDone}</span>
+			</div>
+		{/if}
+		{#if retitleError}
+			<div class="notice warn" transition:fly={{ y: -12, duration: 220 }}>
+				<span class="kicker">Name</span>
+				<span>{retitleError}</span>
+				<button class="mini" onclick={() => (retitleError = '')}>OK</button>
 			</div>
 		{/if}
 		{#if pdfError}
@@ -3193,6 +3250,32 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+	/* The owner's title is a button: a tap renames the note. */
+	button.retitle {
+		display: block;
+		max-width: 100%;
+		padding: 0;
+		border: none;
+		background: none;
+		color: inherit;
+		text-align: left;
+		cursor: text;
+	}
+	button.retitle:hover {
+		text-decoration: underline dotted rgb(255 255 255 / 0.35);
+		text-underline-offset: 0.2em;
+	}
+	.titlefield {
+		width: 12em;
+		max-width: 100%;
+		padding: 0 0.2rem;
+		border: none;
+		border-bottom: 1.5px solid var(--lime);
+		border-radius: 0;
+		background: rgb(255 255 255 / 0.08);
+		color: inherit;
+		outline: none;
 	}
 	.meta {
 		display: flex;
