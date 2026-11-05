@@ -793,7 +793,7 @@ sender. Whatever arrives on two paths (a link and the relay) Yjs dedupes.
   (`pendingImport.ts`) and `NoteView` imports it on mount.
 - **Opening a PDF with conote** goes the same way (a new note, in the folder
   the start page shows). The web manifest's `file_handlers` (action
-  `/?open=pdf`, `launch_handler: focus-existing`) puts the installed app in
+  `/?open=pdf`, `launch_handler: navigate-new` — not focus-existing, which stopped a second app window from opening) puts the installed app in
   *Open with* on desktop Chrome/Edge; the Android app has the matching
   intent filter (`FileHandlingActivity0` in `AndroidManifest.xml`,
   `fileHandlingActionUrl0` in `app/build.gradle`, `fileHandlers` in

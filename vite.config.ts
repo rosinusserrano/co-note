@@ -29,7 +29,7 @@ export default defineConfig({
 				// action): the file arrives through launchQueue, see +page.svelte.
 				file_handlers: [{ action: '/?open=pdf', accept: { 'application/pdf': ['.pdf'] } }],
 				// A file opened while conote is open goes to that window.
-				launch_handler: { client_mode: 'focus-existing' },
+				launch_handler: { client_mode: 'navigate-new' },
 				icons: [
 					{ src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
 					{ src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
